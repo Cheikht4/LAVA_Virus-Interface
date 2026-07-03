@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*$py.class
+lava_env/
+venv/
+env/
+.env
+uploads/*
+!uploads/.gitkeep
+results/*
+!results/.gitkeep
+*.log
+*.tmp
+*.bak
+*.backup
+.DS_Store
+cookies.txt
