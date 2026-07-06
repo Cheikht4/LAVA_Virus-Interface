@@ -1422,3 +1422,24 @@ Sur un serveur de diagnostic clinique partagé par plusieurs équipes de recherc
 
 **Impact attendu** :
 Confinement absolu de tous les fichiers de résultats dans le répertoire dédié (`results/`) et respect strict des limites de calcul simultané en environnement multi-utilisateurs.
+
+---
+
+### [2026-07-06] Durcissement de Sécurité (Fin d'Audit) : Masquage des Traces en Production et Purge du Rate Limiter
+
+**Date/Étape** : 2026-07-06 - Finalisation de l'audit de sécurité et durcissement de l'interface web (`lava_flask_app.py`).
+
+**Fichiers impactés** :
+- `lava_flask_app.py`
+
+**Nature du changement** : [Sécurité / Architecture / Bug Fix]
+
+**Explication technique** :
+1. **Masquage conditionnel de la trace technique (`technical_error`)** : Dans la route `/api/status`, l'ajout du champ `technical_error` (trace brute Python/Perl) au flux JSON renvoyé au client est désormais strictement conditionné au mode de développement (`os.environ.get('FLASK_ENV') != 'production'`). En environnement de production, seule l'explication traduite et vulgarisée (`error`) est transmise au client web, interdisant toute fuite d'informations sur l'architecture interne du serveur ou les chemins de fichiers.
+2. **Purge active de la mémoire du Rate Limiter** : Au sein de la boucle de nettoyage asynchrone (`background_data_cleanup`), un mécanisme de purge des adresses IP inactives a été ajouté. Toutes les heures, les horodatages des requêtes dans `ip_request_history` sont filtrés sur une fenêtre glissante de 3600 secondes ; si la liste d'une IP devient vide, sa clé est définitivement supprimée du dictionnaire `defaultdict(list)`, éliminant toute accumulation passive et fuite mémoire sur les serveurs de longue durée.
+
+**Justification biologique** :
+Dans un contexte de diagnostic hospitalier ou de veille épidémiologique en production, l'exposition des traces d'erreurs brutes (contenant des chemins d'accès serveur, des structures de répertoires ou des commandes système) représente un vecteur d'attaque d'ingénierie inverse. Leur masquage garantit l'inviolabilité de la plateforme LAVA-DNA tout en conservant une remontée d'erreur claire pour les virologues. De plus, la purge mémoire préserve la stabilité opérationnelle des serveurs lors des campagnes massives de screening sur plusieurs mois.
+
+**Impact attendu** :
+Sécurité maximale des échanges API en environnement de production (aucune fuite technique) et stabilité mémoire garantie sur le long terme sans redémarrage de l'application web.

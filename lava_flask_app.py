@@ -1292,7 +1292,7 @@ def api_status(execution_id):
     if 'error' in execution:
         data['error'] = execution['error']
     
-    if 'technical_error' in execution:
+    if 'technical_error' in execution and os.environ.get('FLASK_ENV') != 'production':
         data['technical_error'] = execution['technical_error']
     
     if 'completion_message' in execution:
@@ -1715,6 +1715,13 @@ def background_data_cleanup():
             retention_hours = float(os.environ.get('DATA_RETENTION_HOURS', 48))
             retention_seconds = retention_hours * 3600
             now = datetime.now()
+            
+            # Purge du rate limiter : retirer les IP inactives
+            now_ts = time_module.time()
+            for ip in list(ip_request_history.keys()):
+                ip_request_history[ip] = [t for t in ip_request_history[ip] if now_ts - t < 3600]
+                if not ip_request_history[ip]:
+                    ip_request_history.pop(ip, None)
 
             to_remove = []
             for exec_id, exec_data in list(running_executions.items()):
