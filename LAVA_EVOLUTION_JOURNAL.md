@@ -1341,6 +1341,28 @@ Une bascule instantanée et complète en anglais ou en français de la page de s
 
 ---
 
+### [2026-07-03] Création du Dépôt Git Autonome de l'Interface Web (LAVA-Web)
+
+**Date/Étape** : 2026-07-03 - Structuration d'un dépôt propre dédié au déploiement de l'interface graphique et à la publication.
+
+**Fichiers impactés** :
+- `lava-interface-public/` (Nouveau dépôt autonome)
+- `README.md`
+- `.gitignore`
+
+**Nature du changement** : [Architecture / Publication]
+
+**Explication technique** :
+Création et initialisation d'un dépôt Git dédié (`lava-interface-public`) en miroir du dépôt moteur (`lava-dna-public` / `LAVA-Virus`). Ce nouveau dépôt regroupe exclusivement l'application web Flask (`lava_flask_app.py`), les templates bilingues (`templates/`), les scripts de production (`deployment/`), ainsi que le sous-ensemble minimal de modules scientifiques Perl requis pour son exécution en production. Tous les fichiers de log, caches Python, fichiers temporaires et archives de travail sont rigoureusement exclus via un `.gitignore` optimisé.
+
+**Justification biologique** :
+Séparer clairement le dépôt de l'interface web prête à l'emploi du dépôt moteur de recherche fondamentale permet de proposer à la communauté scientifique et aux laboratoires cliniques un package web immédiatement déployable sur serveur de diagnostic, sans alourdir le dépôt avec l'historique d'expérimentation ou les scripts de test algorithmique.
+
+**Impact attendu** :
+Disponibilité et publication officielle du package Git public sur GitHub sous le nom `LAVA_Virus-Interface` (https://github.com/Cheikht4/LAVA_Virus-Interface.git), simplifiant drastiquement l'installation et la maintenance de serveurs LAVA dans les instituts de recherche.
+
+---
+
 ### [2026-07-05] Publication Officielle du Dépôt LAVA_Virus-Interface
 
 **Date/Étape** : 2026-07-05 - Publication et synchronisation du dépôt autonome de l'interface graphique.
@@ -1379,3 +1401,24 @@ Alors que les algorithmes de recherche fondamentale en bioinformatique gagnent �
 
 **Impact attendu** :
 Protection complète de la propriété intellectuelle de l'interface graphique LAVA-DNA, tout en préservant l'ouverture open-source du moteur de calcul bioinformatique sous-jacent.
+
+---
+
+### [2026-07-06] Durcissement de Sécurité : Traversée de Répertoire et Concurrence Atomique
+
+**Date/Étape** : 2026-07-06 - Audit et correction de vulnérabilités sur l'interface web (`lava_flask_app.py`).
+
+**Fichiers impactés** :
+- `lava_flask_app.py`
+
+**Nature du changement** : [Sécurité / Architecture]
+
+**Explication technique** :
+1. **Protection contre la traversée de répertoire (`output_name`)** : Nettoyage systématique du paramètre `output_name` issu du formulaire via `secure_filename()` avant toute construction de chemin dans `execute_lava`. Si la chaîne nettoyée est vide (ex: saisie malveillante du type `../../`), le système applique automatiquement la valeur par défaut sécurisée `'lava_result'`.
+2. **Synchronisation atomique des quotas de concurrence** : Introduction d'un verrou global `executions_lock = threading.Lock()`. Dans la route `/execute`, la vérification des quotas (seuils globaux et par utilisateur) et l'insertion de l'exécution dans le dictionnaire `running_executions` avec le statut `'starting'` sont désormais encapsulées dans un unique bloc atomique (`with executions_lock:`), éliminant toute race condition lors de requêtes simultanées.
+
+**Justification biologique** :
+Sur un serveur de diagnostic clinique partagé par plusieurs équipes de recherche, l'intégrité du système de fichiers est primordiale pour éviter l'écrasement ou la fuite de données génomiques sensibles (séquences virales de patients). De plus, le calcul d'amorces LAMP étant intensif en ressources CPU, garantir l'inviolabilité des quotas d'exécution empêche toute surcharge accidentelle ou déni de service (DoS) qui paralyserait les analyses en cours.
+
+**Impact attendu** :
+Confinement absolu de tous les fichiers de résultats dans le répertoire dédié (`results/`) et respect strict des limites de calcul simultané en environnement multi-utilisateurs.
