@@ -113,6 +113,9 @@ TRANSLATIONS = {
         'max_per_window_desc': 'Nombre max d\'amorces gardées par fenêtre. 0 = désactivé. Ex: 3 = 3 meilleurs par fenêtre.',
         'spatial_reduction_info': 'Garde les K meilleurs candidats par fenêtre de W nucléotides. Réduit le temps de calcul sans sacrifier la diversité spatiale. Valeurs recommandées : Fenêtre=10, Max=3.',
         'save_params': 'Sauvegarder les paramètres',
+        'import_params': 'Importer un fichier de paramètres',
+        'params_imported': 'Paramètres importés et appliqués avec succès !',
+        'error_import_params': 'Erreur : impossible de lire ou d\'appliquer le fichier de paramètres',
         'execution_title': '3. Exécution LAVA',
         'output_name': 'Nom du fichier de sortie',
         'execute_button': 'Lancer l\'exécution',
@@ -297,6 +300,9 @@ TRANSLATIONS = {
         'max_per_window_desc': 'Max primers kept per window. 0 = disabled. E.g. 3 = 3 best per window.',
         'spatial_reduction_info': 'Keeps the K best candidates per W-nucleotide window. Drastically reduces computation time without sacrificing spatial diversity. Recommended: Window=10, Max=3.',
         'save_params': 'Save parameters',
+        'import_params': 'Import parameters file',
+        'params_imported': 'Parameters successfully imported and applied!',
+        'error_import_params': 'Error: could not read or apply parameters file',
         'execution_title': '3. LAVA Execution',
         'output_name': 'Output file name',
         'execute_button': 'Launch execution',
@@ -734,6 +740,113 @@ def update_params():
     session.modified = True
     flash(get_text('params_updated'), 'success')
     return redirect(url_for('index'))
+
+@app.route('/upload_params_file', methods=['POST'])
+def upload_params_file():
+    """Importe et applique des parametres depuis un fichier (.params.txt ou .json) d'un run precedent"""
+    if 'params' not in session:
+        session['params'] = get_default_params()
+    
+    file = request.files.get('params_file')
+    if not file or not file.filename:
+        return jsonify({'status': 'error', 'message': get_text('no_file_uploaded')}), 400
+    
+    try:
+        content = file.read().decode('utf-8', errors='replace')
+        param_mapping = {
+            'iupac_match_percent': 'primer_iupac_min_percent',
+            'minimum_primer_coverage': 'min_primer_coverage', 
+            'minimum_signature_coverage': 'min_signature_coverage',
+            'mismatch_tolerance': 'primer_min_match_percent',
+        }
+        reverse_mapping = {v: k for k, v in param_mapping.items()}
+        
+        # Test si fichier JSON
+        if content.strip().startswith('{'):
+            try:
+                import json
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    if 'script_type' in data:
+                        session['params']['script_type'] = data['script_type']
+                    if 'lamp_mode' in data:
+                        _apply_lamp_mode(session['params'], data['lamp_mode'], session['params'].get('script_type', 'STEM'))
+                        
+                    for k, v in data.items():
+                        if k not in ['script_type', 'lamp_mode']:
+                            py_key = k
+                            if k not in session['params'] and k in reverse_mapping:
+                                py_key = reverse_mapping[k]
+                            elif k not in session['params'] and k in param_mapping:
+                                py_key = param_mapping[k]
+                            
+                            session['params'][py_key] = _convert_param_value(py_key, v)
+            except Exception as e:
+                return jsonify({'status': 'error', 'message': f"Erreur de lecture JSON: {str(e)}"}), 400
+        else:
+            # Format texte LAVA (.params.txt ou ligne a ligne --param: val)
+            lines = content.splitlines()
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith('===') or line.startswith('---'):
+                    continue
+                
+                # Verifier Script:
+                if line.lower().startswith('script:'):
+                    val = line.split(':', 1)[1].strip()
+                    if 'stem' in val.lower():
+                        session['params']['script_type'] = 'STEM'
+                    elif 'loop' in val.lower():
+                        session['params']['script_type'] = 'LOOP'
+                    continue
+                
+                # Verifier Mode LAMP:
+                if line.lower().startswith('mode lamp:'):
+                    val = line.split(':', 1)[1].strip().lower()
+                    if val in ['classic', 'enriched']:
+                        _apply_lamp_mode(session['params'], val, session['params'].get('script_type', 'STEM'))
+                    continue
+                
+                # Parser ligne cle: valeur ou --cle: valeur ou cle = valeur
+                key = None
+                val = None
+                if ':' in line:
+                    parts = line.split(':', 1)
+                    key = parts[0].strip()
+                    val = parts[1].strip()
+                elif '=' in line:
+                    parts = line.split('=', 1)
+                    key = parts[0].strip()
+                    val = parts[1].strip()
+                elif line.startswith('--'):
+                    parts = line.split(maxsplit=1)
+                    if len(parts) == 2:
+                        key = parts[0].strip()
+                        val = parts[1].strip()
+                
+                if key and val is not None:
+                    while key.startswith('-'):
+                        key = key[1:]
+                    key = key.strip()
+                    
+                    if key.lower() in ['date', 'input fasta', 'output base', 'script', 'mode lamp']:
+                        continue
+                    
+                    py_key = key
+                    if key in param_mapping:
+                        py_key = param_mapping[key]
+                    
+                    if py_key in ['include_stem_primers', 'include_loop_primers']:
+                        bool_val = str(val).lower() in ['1', 'true', 'yes', 'on']
+                        session['params'][py_key] = bool_val
+                    else:
+                        session['params'][py_key] = _convert_param_value(py_key, val)
+        
+        session.modified = True
+        return jsonify({'status': 'success', 'message': get_text('params_imported'), 'params': session['params']})
+        
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': f"{get_text('error_import_params')} ({str(e)})"}), 500
 
 def translate_error_to_user_friendly(error_message, lang='fr'):
     """Traduit les erreurs techniques en messages compréhensibles pour l'utilisateur"""
