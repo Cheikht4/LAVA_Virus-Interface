@@ -1539,3 +1539,309 @@ Les pipelines bioinformatiques exposés sur un serveur web clinique doivent gara
 
 **Impact attendu** :
 Une sécurité logicielle de niveau production : étanchéité totale face aux injections de paramètres illégitimes et aux surcharges serveur, sans altérer l'expérience utilisateur lors de l'import de fichiers de paramètres légitimes.
+
+---
+
+### [2026-07-15] Parallélisation Multi-Cœurs du Moteur Combinatoire LAVA (Option B)
+
+**Date/Étape** : 2026-07-15 - Parallélisation multi-processus native des boucles combinatoires via `Parallel::ForkManager`.
+
+**Fichiers impactés** :
+- `lib/LLNL/LAVA/ForkManager.pm` (nouveau module d'encapsulation multi-cœurs)
+- `lava_loop_primer.pl` (parallélisation des boucles combinatoires Forward et Reverse, option `--threads|cpu`)
+- `lava_stem_primer.pl` (parallélisation des boucles combinatoires Stem Forward et Stem Reverse, option `--threads|cpu`)
+
+**Nature du changement** : [Algorithmique / Architecture / Performance]
+
+**Explication technique** :
+1. **Implémentation du module `LLNL::LAVA::ForkManager` (Option B)** : Création d'un module Perl interne gérant dynamiquement la concurrence multi-cœurs. Si le module CPAN `Parallel::ForkManager` est disponible sur l'hôte, le moteur exploite le multi-processus POSIX nativement. Si le module n'est pas installé, un mode dégradé séquentiel ultra-léger garantit la portabilité sans erreur de compilation.
+2. **Découpage en Chunks et Copy-On-Write (COW)** : Au lieu d'utiliser le module natif `threads` de Perl (sujet à de lourdes fuites mémoire avec BioPerl et déconseillé en bioinformatique intensive), l'architecture sépare l'espace de recherche en sous-ensembles (chunks) d'amorces (`$chunk_start` à `$chunk_end`). Chaque processus enfant hérite instantanément des tables de pénalités en lecture seule grâce au mécanisme de mémoire partagée *Copy-On-Write* du noyau Unix.
+3. **Agrégation Déterministe et Filtrage Thermodynamique** : À la fin de chaque sous-processus (`run_on_finish`), le processus parent agrège les meilleures combinaisons d'amorces (`$bestForwardInfos`, `$bestForwardPenalties`, `$bestReverseInfos`, `$bestReversePenalties`) et additionne les compteurs de signatures (`$_sig_fwd_hits`, `$_sig_rev_hits`).
+4. **Interface CLI `--threads|cpu`** : Ajout du paramètre `--threads|cpu` (valeur par défaut : `auto` configurée sur `LLNL::LAVA::ForkManager->_auto_cpus()`), permettant à l'utilisateur ou à l'interface web d'allouer précisément le nombre de cœurs de calcul ou de laisser le moteur adapter automatiquement sa charge au processeur de la machine.
+
+**Justification biologique** :
+L'évaluation combinatoire exhaustive (recherche d'intersections et minimisation des pénalités sigmoïdes de distance et d'énergie d'hybridation sur l'ensemble des amorces F1c, F2, F3, B1c, B2, B3 et Stem) implique le parcours de plusieurs centaines de milliers à plusieurs millions de combinaisons thermodynamiques (`inner × stem × middle × outer`). Sur des génomes viraux très riches en variants (comme la Dengue ou le SARS-CoV-2), la recherche séquentielle pouvait nécessiter plusieurs heures de calcul. La parallélisation distribue cette évaluation cinétique sur tous les cœurs disponibles, maintenant rigoureusement les mêmes critères de sélectivité (`maxDeltaTm`, `minPrimerSpacing`, `signatureMaxLength`) sans perte de candidats.
+
+**Impact attendu** :
+Réduction drastique du temps d'exécution (accélération quasi-linéaire selon le nombre de cœurs alloués, passant de plusieurs heures à quelques minutes ou secondes sur les jeux d'amorces complexes), tout en garantissant une stricte reproductibilité des signatures LAMP et une stabilité mémoire absolue de l'application serveur LAVA.
+
+---
+
+### [2026-07-15] Parallélisation Multi-Cœurs et Centralisation de la Validation des Amorces (PipelineUtils)
+
+**Date/Étape** : 2026-07-15 - Parallélisation multi-processus de la tolérance aux mésappariements (`checkPrimerMismatchTolerance`) dans `getOligosWithMismatchTolerance` et `buildNativeReversePool`.
+
+**Fichiers impactés** :
+- `lib/LLNL/LAVA/PipelineUtils.pm` (centralisation et parallélisation de `getOligosWithMismatchTolerance` et `buildNativeReversePool`)
+- `lava_loop_primer.pl` (import de `getOligosWithMismatchTolerance` et appel automatique de `set_pipeline_threads`)
+- `lava_stem_primer.pl` (import de `getOligosWithMismatchTolerance` et appel automatique de `set_pipeline_threads`)
+
+**Nature du changement** : [Algorithmique / Architecture / Performance]
+
+**Explication technique** :
+1. **Centralisation de la Validation dans PipelineUtils.pm** : Extraction et harmonisation de la fonction `getOligosWithMismatchTolerance` de `lava_loop_primer.pl` et `lava_stem_primer.pl` vers le module central `lib/LLNL/LAVA/PipelineUtils.pm`. Élimination des redondances algorithmiques entre les deux modes.
+2. **Parallélisation Chunk-Based via ForkManager** : Application de `LLNL::LAVA::ForkManager` au processus de criblage et de validation des amorces (`checkPrimerMismatchTolerance`) dans `getOligosWithMismatchTolerance` (brin plus / Forward) et `buildNativeReversePool` (brin moins / Reverse). Le pool de candidats généré par Primer3 est découpé de manière équilibrée en lots (*chunks*) distribués sur le pool de processus enfants.
+3. **Agrégation des Métriques et Tri Déterminé** : Les processus enfants transmettent leurs amorces validées (strictes ou dégénérées), leurs statistiques et leurs logs de criblage dans un dictionnaire de retour agrégé par `run_on_finish`. Un tri final stable sur la position génomique (`location`) puis sur la longueur (`length`) garantit l'invariance absolue des résultats entre une exécution séquentielle et une exécution parallèle sur $N$ cœurs.
+4. **Synchronisation Dynamique du Pool de Threads** : Ajout de la routine `set_pipeline_threads` dans `PipelineUtils.pm` pour synchroniser globalement le nombre de cœurs alloués avec l'option CLI `--threads|cpu` ou les requêtes Flask transmises depuis l'interface utilisateur.
+
+**Justification biologique** :
+L'évaluation de la tolérance aux mésappariements sur les alignements viraux massifs exige de confronter chaque oligonucléotide candidat (souvent plusieurs milliers par type d'amorce F3, F2, F1c, B1c, B2, B3) contre l'intégralité des séquences du Multiple Sequence Alignment (MSA). Pour chaque amorce et chaque variant, l'algorithme vérifie l'intégrité absolue de la zone 3' critique (site d'initiation de la polymérase) tout en quantifiant la couverture IUPAC et les mutations en 5'/milieu. Cette opération, hautement intensive en calculs de chaînes de caractères et en comptages d'entropie de Shannon, constituait un goulot d'étranglement majeur avant l'étape de combinatoire. Sa distribution sur l'ensemble des cœurs accélère le filtrage initial de l'espace des séquences, permettant l'analyse interactive de panels viraux très profonds sans sacrifier la rigueur de la validation cinétique.
+
+**Impact attendu** :
+Accélération spectaculaire de la phase initiale de validation et de génération des amorces candidates sur l'ensemble des modes (`LOOP` et `STEM`), avec un temps de criblage divisé proportionnellement au nombre de processeurs disponibles sur l'hôte, tout en assurant une architecture logicielle centralisée et propre.
+
+---
+
+### [2026-07-15] Exposition Ergonomique de la Parallélisation Multi-Cœurs sur l'Interface Web (Flask & UI)
+
+**Date/Étape** : 2026-07-15 - Mise à jour de l'interface graphique (`lava_flask_app.py` et `templates/index.html`) pour permettre la configuration du nombre de cœurs / threads depuis le navigateur Web.
+
+**Fichiers impactés** :
+- `lava_flask_app.py` (intégration de `threads` dans les paramètres par défaut `get_default_params()`, le mapping `param_mapping`, `common_params` de la route d'exécution, et les dictionnaires de traduction FR/EN)
+- `templates/index.html` (ajout d'un champ de saisie dédié "Nombre de cœurs / Threads" dans la section Configuration d'exécution)
+
+**Nature du changement** : [Architecture / Interface / Ergonomie]
+
+**Explication technique** :
+1. **Paramétrage par défaut et mapping Flask (`lava_flask_app.py`)** : Ajout de la clé `'threads': 'auto'` dans `get_default_params()`. Le convertisseur `_convert_param_value` gère dynamiquement la saisie d'entiers (`1`, `2`, `4`, `8`...) ou de la chaîne littérale `'auto'`. Lors de la soumission d'une analyse via `/execute`, le paramètre `threads` (ou son alias `cpu`) est injecté directement dans les arguments CLI de la commande Perl (`--threads <valeur>`).
+2. **Champ de contrôle dans l'interface (`templates/index.html`)** : Création d'un champ texte réactif dans l'accordéon "Paramètres Avancés" (section *Execution Config*), permettant au bioinformaticien d'indiquer `auto` ou un nombre explicite de cœurs processeur à allouer.
+3. **Internationalisation (I18n)** : Ajout des clés `threads_label` et `threads_desc` dans les dictionnaires français et anglais du backend Flask pour une expérience utilisateur bilingue fluide.
+
+**Justification biologique** :
+Lors de l'analyse d'alignements viraux complexes, l'allocation dynamique des ressources de calcul est essentielle pour s'adapter à la fois à l'infrastructure matérielle de l'utilisateur (ordinateur portable personnel vs serveur partagé en laboratoire) et à la profondeur du criblage d'amorces LAMP. Donner le contrôle direct sur la parallélisation depuis l'interface Web évite de saturer un serveur multi-utilisateurs tout en permettant, sur machine dédiée, de débloquer la puissance maximale (`auto`) pour accélérer le design d'amorces à haute densité de variants.
+
+**Impact attendu** :
+- Contrôle complet sur l'allocation des cœurs CPU directement depuis l'interface graphique de l'application LAVA.
+- Transparence accrue lors de l'export et de l'import des fichiers de paramètres (`.params.txt` / JSON).
+- Transmission fluide et sécurisée de la configuration de concurrence vers le moteur bioinformatique Perl (`PipelineUtils.pm` et `ForkManager.pm`).
+
+---
+
+### [2026-07-15] Sécurisation et Plafonnement Strict de la Concurrence CPU (`threads` / `ForkManager`)
+
+**Date/Étape** : 2026-07-15 - Mise en place d'une défense en profondeur contre le déni de service (DoS) par sur-souscription des cœurs dans `lava_flask_app.py` et `lib/LLNL/LAVA/ForkManager.pm`.
+
+**Fichiers impactés** :
+- `lava_flask_app.py` (création de la fonction de validation et de plafonnement `_validate_and_cap_threads`, application dans `_convert_param_value` et lors de la soumission dans `/execute` et `execute_lava`, mise à jour des traductions)
+- `lib/LLNL/LAVA/ForkManager.pm` (validation numérique stricte de `max_processes`, repli sur `get_auto_cpu_count()` et instauration d'un plafond dur dans `new`)
+
+**Nature du changement** : [Architecture / Sécurité / Performance]
+
+**Explication technique** :
+1. **Plafonnement et prévention de sur-souscription côté Flask (`lava_flask_app.py`)** :
+   - Introduction d'une validation systématique `_validate_and_cap_threads(val)` qui intercepte toute valeur de `threads` ou `cpu` (depuis le formulaire Web, un fichier de paramètres ou un appel direct).
+   - Prise en compte du plafond administrateur via la variable d'environnement `MAX_THREADS_PER_RUN` (par défaut `os.cpu_count() - 1`).
+   - Calcul d'un plafond effectif de concurrence (`concurrency_cap = max(1, os.cpu_count() // MAX_CONCURRENT_RUNS)`) pour s'assurer que $N$ exécutions simultanées ne saturent pas l'hôte en forkant un nombre de processus supérieur aux cœurs disponibles. Si l'utilisateur demande `auto` ou une valeur numérique excessive (ex: `500`), elle est automatiquement ramenée et bornée au plafond effectif sécurisé. Toute chaîne non numérique (ex: `abc`) retombe sur `auto` sans erreur bloquante.
+2. **Défense en profondeur côté Perl (`LLNL::LAVA::ForkManager`)** :
+   - Dans `sub new`, vérification numérique stricte (`$max_processes !~ /^-?\d+$/`) pour éliminer la coercition de chaînes invalides qui déclenchait des avertissements Perl, repliant immédiatement sur le décompte automatique `get_auto_cpu_count()`.
+   - Application d'un plafond dur au niveau du moteur : si `max_processes` dépasse le nombre réel de cœurs disponibles sur la machine (`$auto_count`), il est automatiquement rabattu à cette limite avec émission d'un avertissement (`warn`), y compris lors des appels en ligne de commande autonomes hors interface Web.
+3. **Documentation I18n** : Maintien d'un libellé d'aide concis et épuré pour `threads_desc` en français et en anglais (`Nombre de cœurs CPU alloués ('auto' ou entier ex: 4).`) afin de ne pas surcharger visuellement l'utilisateur final.
+
+**Justification biologique** :
+La validation thermodynamique des amorces LAMP à l'échelle d'alignements complets de génomes viraux est l'opération la plus exigeante en temps processeur et en bande passante mémoire du pipeline bioinformatique. Sans plafond d'exécution par processus, une simple erreur de paramétrage (ou une soumission malveillante) demandant 500 cœurs, couplée au quota de 5 exécutions concurrentes du serveur, provoquerait le fork instantané de 2500 processus lourds manipulant de larges objets BioPerl. Ce phénomène d'écrasement mémoire et de sur-souscription CPU entraînerait un effondrement immédiat du système (Kernel OOM Killer) et la perte des calculs en cours pour tous les scientifiques du laboratoire. Le plafonnement proportionnel assure l'isolation inter-processus et la stabilité opérationnelle continue du moteur scientifique LAVA.
+
+**Impact attendu** :
+- Protection absolue contre la surcharge processeur et l'épuisement de mémoire sur le serveur hôte.
+- Fonctionnement fluide et garanti de 5 analyses LAMP simultanées sans contention ni dégradation de performance.
+- Robustesse totale du moteur Perl autonome (`ForkManager`) face aux saisies aberrantes en ligne de commande (`--threads 500` ou `--threads abc`).
+
+---
+
+### Date/Étape : 2026-07-15 - Correction et fluidification du suivi de progression en temps réel (Autoflush et Granularité ForkManager)
+
+**Fichiers impactés** :
+- `lib/LLNL/LAVA/PipelineUtils.pm`
+- `lava_stem_primer.pl`
+- `lava_loop_primer.pl`
+
+**Nature du changement** : [Bug Fix / Algorithmique / Architecture]
+
+**Explication technique** :
+1. **Suppression du tampon de bloc C/Perl (`$| = 1;`)** :
+   - Lorsque le moteur Perl est invoqué par l'interface Flask via `subprocess.Popen` (tube de communication standard non-TTY), la bibliothèque C sous-jacente active par défaut un tamponnage par blocs (`block buffering` de 8 Ko). En conséquence, les messages de progression `[LAVA-PROGRESS]` restaient capturés en mémoire morte dans le tampon du processus Perl et n'étaient vidés vers l'application Python qu'à l'achèvement final du pipeline, provoquant un saut brutal de la barre de 0% à 100%.
+   - L'activation systématique de l'autoflush (`$| = 1;`) dans `PipelineUtils.pm`, `lava_stem_primer.pl` et `lava_loop_primer.pl`, couplée à un vidage explicite (`select(STDOUT); $| = 1;`) après chaque `printf("[LAVA-PROGRESS] ...")`, force le canal STDOUT à transmettre instantanément chaque mise à jour vers le contrôleur Flask.
+2. **Optimisation de la granularité de parallélisation (`$n_chunks`)** :
+   - Les boucles de validation thermodynamique (`getOligosWithMismatchTolerance`) et les boucles combinatoires (`lava_stem_primer.pl`, `lava_loop_primer.pl`) sous `LLNL::LAVA::ForkManager` découpaient auparavant l'espace de recherche en un nombre de lots strictement égal à `max_processes` (ou à un lot unique en mode mono-processeur). La notification `run_on_finish` n'étant émise par le processus parent qu'à la terminaison de chaque lot, le suivi restait figé pendant de longues périodes.
+   - Le coefficient de granularité a été multiplié par un facteur 12 (`max_processes * 12` avec un seuil minimal de 25 à 30 lots de travail). Ce découpage fin garantit que les sous-processus retournent continuellement des lots partiels validés à cadence régulière.
+
+**Justification biologique** :
+Lors du design d'amorces LAMP sur des génomes viraux complets ou très polymorphes, l'exploration combinatoire des distances inter-amorces (F3-B3, F1c-B1c, boucles et tiges) implique le test de dizaines de milliers de quadruplets et sextuplets oligonucléotidiques. Pour le bioinformaticien, une barre de progression figée à 0% ou ne se chargeant qu'en toute fin d'analyse génère une ambiguïté sur l'état du serveur (suspicion de blocage infini, de boucle morte ou d'épuisement mémoire). La restitution fluide de la cinétique de criblage permet au scientifique de surveiller l'avancement réel du filtrage thermodynamique, d'anticiper le temps d'attente (ETA précis) et de valider la réactivité de la grappe de calcul.
+
+**Impact attendu** :
+- Affichage continu, précis et en temps réel de la barre de progression sur l'interface de surveillance Web (`monitor.html`).
+- Fin définitive de la latence visuelle et du chargement instantané à 100% en fin d'exécution.
+- Fluidité de suivi garantie à la fois en exécution monocoq (`threads=1`) et en parallélisation intensive multicoq.
+
+---
+
+### Date/Étape : 2026-07-15 - Suppression du bridage modulo 200 et émission continue des transitions d'étapes
+
+**Fichiers impactés** :
+- `lib/LLNL/LAVA/PipelineUtils.pm`
+- `templates/monitor.html`
+
+**Nature du changement** : [Bug Fix / Architecture]
+
+**Explication technique** :
+1. **Suppression du bridage de fréquence (`return if $done % 200 != 0`) dans `_update_progress`** :
+   - Historiquement, la fonction `_update_progress` s'interrompait silencieusement si l'avancement incrémental `$done` n'était pas un multiple strict de 200 ou n'égalait pas `$total`. Sous la gestion multi-processus (`ForkManager`), les processus enfants restituent des lots dont la taille (`$chunk_size`) n'est pratiquement jamais un multiple exact de 200 (ex: 314, 628, 942...). En conséquence, la condition `return if ...` bloquait 99% des émissions `[LAVA-PROGRESS]` vers l'application Flask, laissant la barre invisible ou figée à 0% jusqu'à l'achèvement du tout dernier lot ($done == $total) où elle bondissait à 100%.
+   - Ce filtre par modulo a été intégralement supprimé : chaque retour d'un lot d'exécution émet désormais immédiatement la ligne de statut dans le flux standard, permettant une progression visuelle fluide de 0% à 100%.
+2. **Émission d'initialisation de transition (`_make_progress_bar`)** :
+   - Lors du basculement d'une étape du pipeline à la suivante (ex: passage de `Outer Forward F3` à `Outer Reverse B3`), la création de la nouvelle instance de barre de progression (`_make_progress_bar`) n'émettait aucune ligne `[LAVA-PROGRESS] $label|0|$total`. L'interface Web conservait alors le libellé et le statut 100% de l'étape précédente pendant toute la durée de la nouvelle étape.
+   - Un appel explicite `printf("[LAVA-PROGRESS] %s|0|%d||? it/s|0\n", $label, $total)` a été ajouté dès l'instanciation de la barre, forçant la carte de monitoring à basculer instantanément sur le titre de la nouvelle étape et à réinitialiser la progression à 0%.
+3. **Ré-animation graphique (`monitor.html`)** :
+   - Dans l'interface de surveillance, lorsqu'une étape atteignait 100%, la classe CSS `progress-bar-animated` était retirée définitivement. Un branchement `else` (`pct < 100`) a été ajouté pour réinsérer dynamiquement cette classe à l'arrivée d'une nouvelle étape de calcul.
+
+**Justification biologique** :
+Dans un pipeline de criblage LAMP de haute spécificité, les étapes successives (validation des amorces F3, puis B3, puis F2/F1c/B2/B1c, et enfin la combinatoire des tiges et boucles) ont des durées intrinsèquement hétérogènes. Si le scientifique ne perçoit pas la transition exacte entre le filtrage de la région 5' (Forward) et de la région 3' (Reverse), il ne peut pas diagnostiquer quelle population oligonucléotidique subit le taux d'attrition ou de rejet thermodynamique le plus sévère. La transparence continue du suivi est indispensable pour ajuster les fenêtres de tolérance d'hybridation et d'entropie d'alignement.
+
+**Impact attendu** :
+- Affichage immédiat de la barre dès 0% à l'amorçage de chaque étape de criblage (F3, B3, F2, B2, etc.).
+- Mise à jour régulière et proportionnelle de la jauge à chaque retour de lot, sans saut brutal à 100%.
+- Basculement instantané du libellé et réactivation de l'animation visuelle lors du passage à l'étape suivante.
+
+---
+
+### Date/Étape : 2026-07-15 - Déverrouillage du bornage explicite des threads dans l'interface Web
+
+**Fichiers impactés** :
+- `lava_flask_app.py`
+
+**Nature du changement** : [Bug Fix / Architecture]
+
+**Explication technique** :
+- Lors de la validation des paramètres entrants (`_validate_and_cap_threads` dans `lava_flask_app.py`), le calcul du plafond effectif (`effective_cap`) appliquait une division rigide par le quota maximal d'exécutions concurrentes (`cpu_count // MAX_CONCURRENT_RUNS`). Sur une station de travail 10 cœurs (ex: MacBook Pro M1/M2/M3) avec un quota par défaut de 5 exécutions (`MAX_CONCURRENT_RUNS=5`), ce calcul imposait systématiquement un plafond maximal à 2 cœurs (`10 // 5 = 2`).
+- En conséquence, quelle que soit la valeur inscrite par l'utilisateur dans l'interface Web (`4`, `6`, `8` ou `auto`), la fonction de validation rabattait inconditionnellement le paramètre à `2` (`min(val, 2)`).
+- Ce bridage par division a été supprimé au profit d'un bornage direct et lisible par le plafond maximal de sécurité du système (`cpu_count - 1` ou la variable d'environnement `MAX_THREADS_PER_RUN`). Si un utilisateur demande explicitement 4, 6 ou 8 cœurs sur sa machine 10 cœurs, l'interface accepte et transmet exactement cette valeur au moteur Perl (`--threads 4` / `--threads 8`). Le mode `auto` s'aligne automatiquement sur la capacité maximale raisonnable (`cpu_count - 1`).
+
+**Justification biologique** :
+En recherche génomique virale, lorsqu'un bioinformaticien exécute localement une analyse lourde sur son poste de travail ou sur une grappe dédiée pour concevoir des amorces LAMP à large spectre (ex: validation sur des centaines d'alignements complets de Fièvre Jaune ou Dengue), il a besoin de mobiliser toute la puissance de calcul disponible de sa machine pour réduire le temps de criblage thermodynamique de plusieurs heures à quelques minutes. Imposer un bridage fixe à 2 cœurs par calcul empêchait l'exploitation réelle des architectures multicoq modernes et ralentissait inutilement la recherche combinatoire.
+
+**Impact attendu** :
+- Prise en compte exacte et fidèle de la valeur saisie par l'utilisateur pour le paramètre `--threads` (`4`, `6`, `8`...).
+- Attribution automatique de tous les cœurs disponibles moins un (`9` sur un système 10 cœurs) lorsque le mode `auto` est sélectionné.
+- Suppression définitive du blocage à `threads = 2`.
+
+---
+
+### Date/Étape : 2026-07-16 - Remplacement de l'optimisation gloutonne positionnelle par une recherche combinatoire optimale exact dans Validator.pm
+
+**Fichiers impactés** :
+- `lib/LLNL/LAVA/Validator.pm`
+
+**Nature du changement** : [Algorithmique / Thermodynamique / Biologie]
+
+**Explication technique** :
+1. **Suppression de la sélection gloutonne gauche vers droite dans `checkPrimerMismatchTolerance`** :
+   - L'algorithme précédent parcourait la séquence de l'amorce candidate de l'extrémité 5' vers 3' et appliquait un code IUPAC à chaque position sous le seuil de conservation (`min_match_percent`), en s'arrêtant dès épuisement du budget (`max_total_degen`). Ce comportement positionnel rejetait faussement de nombreuses amorces candidates valides, car la couverture n'est pas additive (une séquence cible n'est couverte que si elle s'hybride sur toutes les positions de l'amorce simultanément).
+2. **Recherche combinatoire optimale (Branch and Bound exact sur sous-ensembles)** :
+   - L'instrumentation exécutée sur les 19 617 amorces candidates du jeu de données Fièvre Jaune a révélé que le nombre moyen de positions candidates par amorce est de 5,028 (avec 93,2% des amorces ayant entre 1 et 8 positions candidates, et un maximum absolu de 25).
+   - L'optimisation dégénérée (Phase 3) est désormais structurée par une recherche combinatoire exacte sur l'ensemble de tous les sous-ensembles $S$ de positions candidates valides respectant la contrainte de cardinalité ($|S| \le \text{max\_total\_degen}$), les limites en 3' (`max_3p_degen`) et les limites de contiguïté (`max_consec_degen`).
+   - Pour chaque combinaison valide, la couverture d'intersection sur toutes les séquences cibles est directement évaluée en Phase 4. Le moteur retient la combinaison qui maximise le taux de couverture global tout en minimisant le nombre total de bases dégénérées pour préserver la stabilité thermodynamique.
+
+**Justification biologique** :
+Lors de la conception d'essais LAMP face à des souches virales émergentes ou à des familles hautement polymorphes (ex: Fièvre Jaune, Dengue), les mutations qui distinguent les principaux sous-types épidémiques ne sont pas réparties uniformément de la gauche vers la droite de l'oligonucléotide. En forçant la consommation du budget de dégénérescence sur les premières mutations rencontrées en 5', l'ancien algorithme se privait d'insérer une base dégénérée plus loin en 3' ou au centre, là où une seule modification IUPAC aurait pu capturer 95% du pool viral. La sélection combinatoire optimale garantit que chaque base dégénérée est investie stratégiquement à la position qui maximise la couverture réelle de l'alignement viral global.
+
+**Impact attendu** :
+- Augmentation significative de la sensibilité diagnostique du pipeline LAVA avec récupération automatique d'amorces à haute couverture auparavant rejetées.
+- Élimination totale du biais géométrique (gauche vers droite) lors du placement des dégénérescences IUPAC.
+- Temps de calcul par amorce maintenu de l'ordre de quelques microsecondes grâce à la faible cardinalité des combinaisons candidates.
+
+---
+
+### Date/Étape : 2026-07-16 - Mise en place de l'Étape 1 (protection combinatoire contre l'explosion dans Validator.pm)
+
+**Fichiers impactés** :
+- `lib/LLNL/LAVA/Validator.pm`
+
+**Nature du changement** : [Algorithmique / Thermodynamique / Performance]
+
+**Explication technique** :
+- **Tri heuristique Best-First par impact de couverture (`gain`)** : Lors de la phase d'identification des positions candidates modifiables (`@candidate_positions`), chaque position enregistre désormais son gain de couverture potentiel (`gain = iupac_percent - primer_base_percent`). Les positions sont triées par gain décroissant puis par criticité de zone en 3' avant de lancer l'exploration Branch and Bound.
+- **Plafonnement des positions candidates (`Top-12 candidates capping`)** : Si le nombre total de positions modifiables sur une amorce dépasse 12 (ce qui se produit sur environ 6,8% des amorces dans les régions virales hypervariables où `n_cand` peut atteindre 25), le moteur retient exclusivement les 12 positions qui maximisent le gain de couverture (`splice(@candidate_positions, 12)`). L'espace de recherche factoriel est ainsi mathématiquement borné de $\binom{25}{k}$ (plusieurs millions de combinaisons) à un maximum strict de $\binom{12}{k} \le 4096$ combinaisons.
+- **Budget maximal d'évaluation (`Early Termination Budget`)** : Intégration d'un compteur global d'évaluations (`$eval_count`) limité à 2000 sous-ensembles par amorce candidate. Si ce plafond est atteint, l'algorithme interrompt immédiatement l'exploration et retourne le meilleur oligonucléotide dégénéré trouvé, garantissant l'absence totale d'interblocage ou d'épuisement CPU.
+
+**Justification biologique** :
+En présence de gènes viraux fortement mutés (ex: gènes d'enveloppe de la Dengue ou de la Fièvre Jaune multilatérale), certaines séquences cibles présentent plus d'une vingtaine de polymorphismes mineurs sur 20 à 25 nucléotides de longueur d'amorce. Évaluer exhaustivement toutes les combinaisons dégénérées possibles ($>3 \times 10^6$) sur ces zones très bruitées ne présente aucun intérêt thermodynamique : une amorce incorporant plus de 4 à 6 bases dégénérées devient instable et forme des structures secondaires hétérogènes. En triant les mutations par leur apport direct en couverture et en élaguant l'espace de recherche aux 12 positions les plus structurantes, l'algorithme concentre sa puissance de calcul sur les dégénérescences biologiquement viables qui capturent les variants majeurs de l'épidémie.
+
+**Impact attendu** :
+- Élimination garantie de toute explosion combinatoire ou ralentissement lors de la validation des amorces dans les régions génomiques hypervariables.
+- Maintien d'une vitesse de validation inférieure à la milliseconde par amorce, y compris sur les cas limites (`n_cand > 20`).
+- Sélection des combinaisons IUPAC offrant le meilleur compromis couverture / stabilité thermodynamique grâce à l'exploration prioritaire Best-First.
+
+---
+
+### Date/Étape : 2026-07-16 - Correction de la contrainte de positions consécutives dans la recherche combinatoire de Validator.pm
+
+**Fichiers impactés** :
+- `lib/LLNL/LAVA/Validator.pm`
+- `t/30_testValidator.t`
+
+**Nature du changement** : [Bug Fix / Algorithmique / Thermodynamique]
+
+**Explication technique** :
+- **Indépendance vis-à-vis de l'ordre de tri des gains** : La vérification de la contrainte des positions consécutives (`max_consec_degen`) supposait auparavant que le tableau du sous-ensemble courant (`$current_combo_ref`) était ordonné par indice de position croissante. Depuis l'introduction du tri par gain de couverture (Étape 1), ce tableau est ordonné par gain décroissant (ex: `[7, 5, 6]`). L'ancienne vérification échouait à détecter les suites adjacentes insérées dans le désordre.
+- **Réécriture par tri et décompte exact** : Avant d'accepter l'ajout d'une position candidate dans le sous-ensemble combinatoire en cours d'exploration, l'algorithme extrait l'ensemble de toutes les positions (`@all_pos = map { $_->{pos} } @$current_combo_ref + $item->{pos}`), les trie par ordre strictement croissant (`sort { $a <=> $b }`), puis calcule la longueur de la plus longue séquence contiguë (`$all_pos[$j] == $all_pos[$j-1] + 1`). Si cette suite dépasse `max_consec_degen`, l'ajout est immédiatement rejeté (`next`).
+- **Enrichissement des tests unitaires** : Ajout de la Section 4 dans `t/30_testValidator.t` comportant 4 tests unitaires de régression sur des jeux de données synthétiques, dont le scénario d'ordre inverse `[7, 5, 6]` et la validation de suites non adjacentes (`[5, 7, 9]`).
+
+**Justification biologique** :
+La formation de dégénérescences (codes IUPAC comme R, Y, W) sur plus de 2 à 3 nucléotides adjacents (ex: `NNN` ou `RRR`) fragilise fortement la stabilité de l'hybridation thermostable requise par la polymérase à 65°C lors d'une réaction LAMP. Ces bulles d'instabilité favorisent les amorces dimères ou des hybridations aspécifiques. Garantir que la limite `max_consec_degen` (généralement configurée à 2 ou 3) est strictement respectée sur l'amorce finale, quel que soit l'ordre dans lequel l'algorithme a découvert et combiné les variants viraux les plus impactants, assure que les amorces conservent une cinétique d'hybridation fiable et spécifique.
+
+**Impact attendu** :
+- Élimination définitive des faux positifs où des séries de bases dégénérées consécutives s'infiltraient à cause de l'ordre de tri par gain.
+
+---
+
+### Date/Étape : 2026-07-17 - Clarification des libellés de dégénérescence et regroupement visuel dans l'interface Flask
+
+**Fichiers impactés** :
+- `lava_flask_app.py`
+- `templates/index.html`
+
+**Nature du changement** : [Architecture / Interface]
+
+**Explication technique** :
+- **Strict maintien des identifiants internes** : Les noms internes des paramètres (`primer_min_match_percent`, `primer_iupac_min_percent`, `min_primer_coverage`) ne sont absolument pas modifiés dans les formulaires HTML ni dans le code Python, garantissant l'entière rétrocompatibilité des fichiers `.params.txt` historiques et des commandes Perl exécutées par le backend.
+- **Clarification sémantique des libellés FR/EN dans `TRANSLATIONS`** :
+  - `primer_min_match_percent` (clé `match_minimum`) : renommé "Seuil de dégénérescence par position (%)" en français et "Per-position degeneracy threshold (%)" en anglais. Sa description indique explicitement que c'est le seuil en dessous duquel une position devient candidate à la dégénérescence.
+  - `primer_iupac_min_percent` (clé `match_after_iupac`) : renommé "Couverture minimale du code IUPAC (%)" en français et "Minimum IUPAC code coverage (%)" en anglais. Sa description clarifie qu'une position candidate n'est dégénérée que si le code IUPAC atteint ce seuil de couverture.
+  - `min_primer_coverage` (clé `primer_elimination`) : renommé "Couverture minimale de l'amorce (%)" en français et "Minimum primer coverage (%)" en anglais, corrigeant l'ancien libellé ("% Élimination primer") qui inversait le modèle mental de l'utilisateur.
+- **Regroupement visuel dans le template `index.html`** : Séparation des paramètres généraux de couverture en deux blocs distincts précédés d'intertitres (`per_position_header` et `per_primer_header`) et de séparateurs visuels (`<hr>`) :
+  - Bloc "Par position" / "Per position" regroupant les seuils agissant position par position lors de la construction (`primer_min_match_percent`, `primer_iupac_min_percent`, et `min_base_frequency`).
+  - Bloc "Par amorce" / "Per primer" isolant le seuil agissant sur la sélection et l'élimination finale de l'amorce complète (`min_primer_coverage`).
+
+**Justification biologique** :
+La distinction entre les mécanismes intervenant au niveau de la base individuelle (où l'algorithme décide d'introduire une mutation ponctuelle de type IUPAC si la conservation chute en dessous d'un seuil donné) et les mécanismes intervenant au niveau de l'oligonucléotide complet (où l'amorce candidate finie est validée ou rejetée selon qu'elle s'hybride à un pourcentage suffisant des souches virales) est fondamentale lors du design d'amorces pour des virus à forte diversité génétique. Ce regroupement évite toute confusion entre la construction positionnelle de l'amorce et le filtre global de couverture.
+
+**Impact attendu** :
+- Compréhension instantanée et intuitive du rôle de chaque paramètre de couverture dans l'interface graphique.
+- Élimination de toute ambiguïté sur le modèle mental des seuils (minimum à atteindre vs seuil d'élimination).
+- Rétrocompatibilité totale avec l'ensemble des exécutions, scripts et fichiers de paramètres passés.
+
+---
+
+### Date/Étape : 2026-07-17 - Harmonisation canonique des noms de paramètres avec alias de rétrocompatibilité à 100 %
+
+**Fichiers impactés** :
+- `lava_loop_primer.pl`
+- `lava_stem_primer.pl`
+- `lava_flask_app.py`
+
+**Nature du changement** : [Architecture]
+
+**Explication technique** :
+- **Harmonisation structurelle sous la convention `primer_min_*_percent`** : Les anciens identifiants internes hétérogènes ont été unifiés dans une convention canonique symétrique :
+  - `primer_min_match_percent` (invariable)
+  - `primer_min_iupac_percent` (harmonisé pour `primer_iupac_min_percent`)
+  - `primer_min_coverage_percent` (harmonisé pour `min_primer_coverage`)
+- **Système d'alias bidirectionnel dans Getopt::Long et affichage de l'aide (`*.pl`)** : Déclaration des alias (`"primer_min_iupac_percent|primer_iupac_min_percent=f"` et `"primer_min_coverage_percent|min_primer_coverage=f"`) combinée à une synchronisation croisée (`//=`) dès la récupération des options. Bascule de l'affichage dans le manuel (`--help` via `printUsage`) vers les noms canoniques harmonisés avec mention explicite des alias historiques entre parenthèses.
+- **Normalisation dans le backend Flask (`lava_flask_app.py`)** : Intégration des alias dans `param_mapping` de `upload_params_file` et de `build_perl_command`, permettant aux utilisateurs d'importer des fichiers `.params.txt` avec les anciens ou les nouveaux identifiants sans aucune erreur ni perte d'information.
+
+**Justification biologique** :
+Dans les chaînes de traitement bioinformatiques à haut débit de type LAVA, la cohérence terminologique et la lisibilité des scripts en ligne de commande réduisent considérablement le risque d'erreur humaine (ex: inversion de paramètres ou oubli de seuils critiques lors d'exécutions par lots sur des clusters HPC pour surveiller des émergences virales). La standardisation de tous les seuils de couverture d'amorces sous la syntaxe `primer_min_*_percent` apporte une clarté immédiate tout en préservant l'exécutabilité des anciens pipelines et historiques de validation.
+
+**Impact attendu** :
+- Convention de nommage cohérente, prédictible et élégante dans tout le code source et dans l'aide `--help` des scripts en ligne de commande.
+- Tolérance zéro pour les régressions : 100 % de rétrocompatibilité assurée avec tous les fichiers de paramètres historiques et les anciens scripts d'automatisation.
+
+

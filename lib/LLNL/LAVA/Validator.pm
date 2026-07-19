@@ -41,6 +41,7 @@ require Exporter;
     validateCompleteSignatureSpacing
 );
 
+
 #=============================================================================
 # IUPAC & SEQUENCE UTILITIES
 #=============================================================================
@@ -220,169 +221,224 @@ sub checkPrimerMismatchTolerance {
   my $perfect_match_count = scalar(@perfect_matches);
   my $perfect_match_percent = ($perfect_match_count / $total_regions) * 100;
   
+  
   # ========================================================================
-  # PHASE 2b: DÉCISION RAPIDE MODIFIÉE (SANS EARLY EXIT COMPLET)
+  # PHASE 2b & PHASE 3: OPTIMISATION COMBINATOIRE OPTIMALE (Branch & Bound)
+  # PHASE 2b & PHASE 3: OPTIMAL COMBINATORIAL OPTIMIZATION (Branch & Bound)
   # ========================================================================
   my $optimized_primer = $candidate_primer_uc;
   my $has_modifications = 0;
-  my ($three_prime_start_idx, $three_prime_end_idx);
-  
-  # Si la couverture brute est déjà suffisante, on évite l'optimisation dégénérée (Phase 3)
-  # mais on passe quand même par la Phase 4 pour évaluer la tolérance aux mismatches réels
-  # If raw coverage is sufficient, skip degeneracy optimization (Phase 3)
-  # but proceed to Phase 4 to compute actual mismatch tolerance.
-  if ($perfect_match_percent >= $min_primer_coverage) {
-      # Skip Phase 3
-  } else {
-      # ========================================================================
-      # PHASE 3: ANALYSE POSITION PAR POSITION (Avec contraintes de dégénérescence) / PHASE 3: POSITION BY POSITION ANALYSIS (With degeneracy constraints)
-      # ========================================================================
-      
-      my @position_compatible_seqs = ();
-      my $degen_total = 0;
-      my $degen_consec = 0;
-      my $degen_3p = 0;
-      
-      $three_prime_start_idx = $length - $zone_size;
-      $three_prime_start_idx = 0 if $three_prime_start_idx < 0;
-      $three_prime_end_idx = $length - 1;
-      
-      # Initialiser tracking
-      for my $pos_offset (0 .. $length - 1) {
-        $position_compatible_seqs[$pos_offset] = [ map { $_->{seq_idx} } @perfect_matches ];
-      }
-      
-      for my $pos_offset (0 .. $length - 1) {
-        my $primer_base = substr($candidate_primer_uc, $pos_offset, 1);
-        my %base_counts = ();
-        my @position_matches = @{$position_compatible_seqs[$pos_offset]};
-        
-        for my $target (@non_matches) {
-          my $target_base = substr($target->{region}, $pos_offset, 1);
-          $base_counts{$target_base}++;
-          if ($target_base eq $primer_base) {
-            push @position_matches, $target->{seq_idx};
-          }
-        }
-        
-        my $primer_base_count = $base_counts{$primer_base} || 0;
-        my $total_primer_matches = scalar(@position_matches);
-        my $primer_base_percent = ($total_primer_matches / $total_regions) * 100;
-        
-        if ($primer_base_percent < $min_match_percent) {
-          # Besoin d'une base dégénérée / Need a degenerate base
-          
-          # Vérifier les limites de dégénérescence avant de générer le code / Check degeneracy limits before generating code
-          $degen_total++;
-          $degen_consec++;
-          
-          if ($pos_offset >= $three_prime_start_idx && $pos_offset <= $three_prime_end_idx) {
-            $degen_3p++;
-          }
-          
-          if ($degen_total > $max_total_degen || 
-              $degen_consec > $max_consec_degen || 
-              $degen_3p > $max_3p_degen) {
-            # Limite de dégénérescence dépassée, on réinitialise l'amorce à sa forme brute et on arrête l'optimisation
-            $optimized_primer = $candidate_primer_uc;
-            $has_modifications = 0;
-            last;
-          }
-          
-          # FILTRE BRUIT (min_base_freq)
-          my $min_count_noise = $total_regions * $min_base_freq;
-          my %significant_bases = ();
-          $significant_bases{$primer_base} = 1;
-          
-          foreach my $b (keys %base_counts) {
-              if ($base_counts{$b} >= $min_count_noise) {
-                  $significant_bases{$b} = 1;
-              }
-          }
-          my @all_bases = keys %significant_bases;
-          my $iupac_code = generateIUPACCode(\@all_bases);
-          
-          if ($iupac_code eq 'N') {
-            # Trop de variation, pas de modif possible fiable
-            $optimized_primer = $candidate_primer_uc;
-            $has_modifications = 0;
-            last;
-          }
-          
-          my @iupac_matches = @{$position_compatible_seqs[$pos_offset]};
-          for my $target (@non_matches) {
-            my $target_base = substr($target->{region}, $pos_offset, 1);
-            if (isIUPACCompatible($target_base, $iupac_code)) {
-              push @iupac_matches, $target->{seq_idx} unless grep { $_ == $target->{seq_idx} } @iupac_matches;
-            }
-          }
-          
-          my $iupac_percent = (scalar(@iupac_matches) / $total_regions) * 100;
-          
-          if ($iupac_percent < $min_iupac_percent) {
-            $optimized_primer = $candidate_primer_uc;
-            $has_modifications = 0;
-            last;
-          }
-          
-          substr($optimized_primer, $pos_offset, 1) = $iupac_code;
-          $position_compatible_seqs[$pos_offset] = \@iupac_matches;
-          $has_modifications = 1;
-        } else {
-          # Pas de dégénérescence à cette position / No degeneracy at this position
-          $degen_consec = 0;
-          $position_compatible_seqs[$pos_offset] = \@position_matches;
-        }
-      }
-  }
-  
-  # ========================================================================
-  # PHASE 4: VALIDATION FINALE (Tolérance Mismatches & Protection 3') / PHASE 4: FINAL VALIDATION (Mismatch Tolerance & 3' Protection)
-  # ========================================================================
-  my @final_compatible_sequences = ();
-  
-  # L'extrémité 3' est TOUJOURS à la fin de la chaîne (5' -> 3') / The 3' end is ALWAYS at the end of the chain (5' -> 3')
-  $three_prime_start_idx = $length - $zone_size;
+  my $three_prime_start_idx = $length - $zone_size;
   $three_prime_start_idx = 0 if $three_prime_start_idx < 0;
-  $three_prime_end_idx = $length - 1;
+  my $three_prime_end_idx = $length - 1;
   
-  for my $target (@target_regions) {
-    my $is_fully_compatible = 1;
-    my $mismatch_count = 0;
+  # Fonction helper d'évaluation d'un candidat sur les cibles (Phase 4 intégrée)
+  # Helper function to evaluate a candidate primer against targets (Integrated Phase 4)
+  my $evaluate_candidate = sub {
+    my ($test_primer_seq, $tolerance) = @_;
+    $tolerance = 0 unless defined $tolerance;  # defaut = correspondance EXACTE (0 mismatch)
+    my @compatible_seqs = ();
     
-    for my $pos_offset (0 .. $length - 1) {
-      my $target_base = substr($target->{region}, $pos_offset, 1);
-      my $primer_base = substr($optimized_primer, $pos_offset, 1);
+    for my $target (@target_regions) {
+      my $is_fully_compatible = 1;
+      my $mismatch_count = 0;
       
-      if (!isIUPACCompatible($target_base, $primer_base)) {
-        # Vérifier si on est dans la zone 3' critique / Check if in the critical 3' zone
-        if ($pos_offset >= $three_prime_start_idx && $pos_offset <= $three_prime_end_idx) {
-          # Mismatch en 3' : REJET IMMÉDIAT
-          $is_fully_compatible = 0;
-          last;
-        } else {
-          # Mismatch hors zone 3' : Toléré jusqu'à max_tolerated_mismatch / Mismatch outside 3' zone: Tolerated up to max_tolerated_mismatch
-          $mismatch_count++;
-          if ($mismatch_count > $max_tolerated_mismatch) {
+      for my $pos_offset (0 .. $length - 1) {
+        my $target_base = substr($target->{region}, $pos_offset, 1);
+        my $primer_base = substr($test_primer_seq, $pos_offset, 1);
+        
+        if (!isIUPACCompatible($target_base, $primer_base)) {
+          # Vérifier si on est dans la zone 3' critique / Check if in the critical 3' zone
+          if ($pos_offset >= $three_prime_start_idx && $pos_offset <= $three_prime_end_idx) {
+            # Mismatch en 3' : REJET IMMÉDIAT / 3' mismatch: IMMEDIATE REJECT
             $is_fully_compatible = 0;
             last;
+          } else {
+            # Mismatch hors zone 3' : Toléré jusqu'à max_tolerated_mismatch / Mismatch outside 3' zone: Tolerated up to max_tolerated_mismatch
+            $mismatch_count++;
+            if ($mismatch_count > $tolerance) {
+              $is_fully_compatible = 0;
+              last;
+            }
           }
         }
       }
+      
+      if ($is_fully_compatible) {
+        push @compatible_seqs, $target->{seq_idx};
+      }
     }
-    
-    if ($is_fully_compatible) {
-      push @final_compatible_sequences, $target->{seq_idx};
-    }
+    return \@compatible_seqs;
+  };
+
+  my $best_primer = $candidate_primer_uc;
+  my $best_compatible_seqs = $evaluate_candidate->($candidate_primer_uc);
+  my $best_coverage_percent = (scalar(@$best_compatible_seqs) / $total_regions) * 100;
+  my $best_mod_count = 0;
+  my $best_3p_count = 0;
+
+  # Si la couverture brute est inférieure à min_primer_coverage, on lance l'optimisation combinatoire
+  # If raw coverage is below min_primer_coverage, run combinatorial optimization
+  if ($best_coverage_percent < $min_primer_coverage && $max_total_degen > 0) {
+      # 1. Identification de toutes les positions candidates modifiables
+      # 1. Identify all candidate modifiable positions
+      my @candidate_positions = ();
+      
+      for my $pos_offset (0 .. $length - 1) {
+          my $primer_base = substr($candidate_primer_uc, $pos_offset, 1);
+          my %base_counts = ();
+          my $position_matches_count = 0;
+          
+          for my $target (@target_regions) {
+              my $target_base = substr($target->{region}, $pos_offset, 1);
+              $base_counts{$target_base}++;
+              if ($target_base eq $primer_base) {
+                  $position_matches_count++;
+              }
+          }
+          
+          my $primer_base_percent = ($position_matches_count / $total_regions) * 100;
+          
+          if ($primer_base_percent < $min_match_percent) {
+              # FILTRE BRUIT (min_base_freq) / NOISE FILTER
+              my $min_count_noise = $total_regions * $min_base_freq;
+              my %significant_bases = ();
+              $significant_bases{$primer_base} = 1;
+              
+              foreach my $b (keys %base_counts) {
+                  if ($base_counts{$b} >= $min_count_noise) {
+                      $significant_bases{$b} = 1;
+                  }
+              }
+              my @all_bases = keys %significant_bases;
+              my $iupac_code = generateIUPACCode(\@all_bases);
+              
+              if ($iupac_code ne 'N' && $iupac_code ne $primer_base) {
+                  # Vérifier le pourcentage de compatibilité avec ce code IUPAC
+                  my $iupac_matches_count = 0;
+                  for my $target (@target_regions) {
+                      my $target_base = substr($target->{region}, $pos_offset, 1);
+                      if (isIUPACCompatible($target_base, $iupac_code)) {
+                          $iupac_matches_count++;
+                      }
+                  }
+                  my $iupac_percent = ($iupac_matches_count / $total_regions) * 100;
+                  
+                  if ($iupac_percent >= $min_iupac_percent) {
+                      my $is_3p = ($pos_offset >= $three_prime_start_idx && $pos_offset <= $three_prime_end_idx) ? 1 : 0;
+                      push @candidate_positions, {
+                          pos   => $pos_offset,
+                          code  => $iupac_code,
+                          is_3p => $is_3p,
+                          gain  => ($iupac_percent - $primer_base_percent)
+                      };
+                  }
+              }
+          }
+      }
+
+      # 2. Énumération combinatoire des sous-ensembles avec protection anti-explosion (Étape 1)
+      # 2. Combinatorial subset enumeration with anti-explosion protection (Step 1)
+      my $n_cand = scalar(@candidate_positions);
+      if ($n_cand > 0) {
+          # ÉTAPE 1 : Tri par gain de couverture décroissant et plafonnement aux Top-12 positions les plus impactantes
+          # STEP 1: Sort by decreasing coverage gain and cap to Top-12 most impactful candidate positions
+          @candidate_positions = sort { $b->{gain} <=> $a->{gain} || $a->{is_3p} <=> $b->{is_3p} } @candidate_positions;
+          if ($n_cand > 12) {
+              splice(@candidate_positions, 12);
+              $n_cand = 12;
+          }
+
+          my $eval_count = 0;
+          my $max_evaluations = 2000;
+          my $recurse;
+          $recurse = sub {
+              my ($idx, $current_combo_ref, $count_3p) = @_;
+              
+              return if $eval_count >= $max_evaluations;
+              
+              # Évaluer si le sous-ensemble courant contient au moins une modification
+              if (@$current_combo_ref > 0) {
+                  $eval_count++;
+                  my $test_primer = $candidate_primer_uc;
+                  for my $item (@$current_combo_ref) {
+                      substr($test_primer, $item->{pos}, 1) = $item->{code};
+                  }
+                  
+                  my $seqs_ref = $evaluate_candidate->($test_primer);
+                  my $cov_pct = (scalar(@$seqs_ref) / $total_regions) * 100;
+                  my $mod_cnt = scalar(@$current_combo_ref);
+                  
+                  # Sélectionner si meilleure couverture, ou même couverture avec moins de modifications ou moins de dégénérescence en 3'
+                  if ($cov_pct > $best_coverage_percent + 1e-6 ||
+                      (abs($cov_pct - $best_coverage_percent) <= 1e-6 && $mod_cnt < $best_mod_count) ||
+                      (abs($cov_pct - $best_coverage_percent) <= 1e-6 && $mod_cnt == $best_mod_count && $count_3p < $best_3p_count)) {
+                      
+                      $best_coverage_percent = $cov_pct;
+                      $best_mod_count = $mod_cnt;
+                      $best_3p_count = $count_3p;
+                      $best_primer = $test_primer;
+                      $best_compatible_seqs = $seqs_ref;
+                  }
+                  
+                  # Si on atteint 100% de couverture, inutile d'ajouter d'autres dégénérescences sur cette branche
+                  return if $best_coverage_percent >= 100.0 && $cov_pct >= 100.0;
+              }
+              
+              # Arrêt si on atteint le budget max / Stop if max budget reached
+              return if scalar(@$current_combo_ref) >= $max_total_degen;
+              
+              for my $i ($idx .. $n_cand - 1) {
+                  return if $eval_count >= $max_evaluations;
+                  my $item = $candidate_positions[$i];
+                  my $new_count_3p = $count_3p + $item->{is_3p};
+                  
+                  # Vérification limite 3' / Check 3' limit
+                  next if $new_count_3p > $max_3p_degen;
+                  
+                  # Vérification limite positions consécutives (indépendante de l'ordre de tri) / Check consecutive limit (order-independent)
+                  if (@$current_combo_ref > 0) {
+                      my @all_pos = map { $_->{pos} } @$current_combo_ref;
+                      push @all_pos, $item->{pos};
+                      @all_pos = sort { $a <=> $b } @all_pos;
+                      
+                      my $max_consec = 1;
+                      my $curr_consec = 1;
+                      for (my $j = 1; $j < scalar(@all_pos); $j++) {
+                          if ($all_pos[$j] == $all_pos[$j-1] + 1) {
+                              $curr_consec++;
+                              $max_consec = $curr_consec if $curr_consec > $max_consec;
+                          } else {
+                              $curr_consec = 1;
+                          }
+                      }
+                      next if $max_consec > $max_consec_degen;
+                  }
+                  
+                  push @$current_combo_ref, $item;
+                  $recurse->($i + 1, $current_combo_ref, $new_count_3p);
+                  pop @$current_combo_ref;
+              }
+          };
+          
+          my @empty_combo = ();
+          $recurse->(0, \@empty_combo, 0);
+      }
   }
-  
-  my $final_coverage_percent = (scalar(@final_compatible_sequences) / $total_regions) * 100;
+
+  $optimized_primer = $best_primer;
+  $has_modifications = ($best_mod_count > 0) ? 1 : 0;
+
+  # Validation finale : la tolerance aux mismatchs n'intervient qu'ICI, contre min_primer_coverage.
+  # Final validation: mismatch tolerance applies ONLY here, against min_primer_coverage.
+  my $tolerant_seqs_r = $evaluate_candidate->($optimized_primer, $max_tolerated_mismatch);
+  my $final_coverage_percent = (scalar(@$tolerant_seqs_r) / $total_regions) * 100;
 
   if ($final_coverage_percent < $min_primer_coverage) {
     return ("", $final_coverage_percent, 0, []);
   }
-  
-  return ($optimized_primer, $final_coverage_percent, $has_modifications, \@final_compatible_sequences);
+
+  return ($optimized_primer, $final_coverage_percent, $has_modifications, $tolerant_seqs_r);
 }
 
 
@@ -422,8 +478,8 @@ sub validateCompleteSignatureSpacing
   # Créer une liste ordonnée de tous les primers avec leurs positions / Create ordered primer list
   my @allPrimers = ();
   
-  # Ajouter les primers forward (F3, F2, F1, FSTEM) — strand par défaut : plus
-  # Add forward primers (F3, F2, F1, FSTEM) — default strand: plus
+  # Ajouter les primers forward (F3, F2, F1, FSTEM) - strand par défaut : plus
+  # Add forward primers (F3, F2, F1, FSTEM) - default strand: plus
   foreach my $primer (@{$forwardPrimers_r}) {
     next if (!defined $primer);
     my $location = $primer->getLocation();
@@ -452,8 +508,8 @@ sub validateCompleteSignatureSpacing
     };
   }
   
-  # Ajouter les primers reverse (BSTEM, B1, B2, B3) — strand par défaut : minus
-  # Add reverse primers (BSTEM, B1, B2, B3) — default strand: minus
+  # Ajouter les primers reverse (BSTEM, B1, B2, B3) - strand par défaut : minus
+  # Add reverse primers (BSTEM, B1, B2, B3) - default strand: minus
   foreach my $primer (@{$reversePrimers_r}) {
     next if (!defined $primer);
     my $location = $primer->getLocation();
@@ -503,5 +559,4 @@ sub validateCompleteSignatureSpacing
   
   return 1; # Validation réussie / Validation passed
 }
-
 1;
