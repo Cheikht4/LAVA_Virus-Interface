@@ -15,3 +15,10 @@ results/*
 *.backup
 .DS_Store
 cookies.txt
+
+t/canary_*_signatures_individuelles/
+t/canary_*_amplified*
+t/canary_*_excluded*
+t/canary_stem_combinations.txt
+t/canary_loop*
+t/canary_stem*

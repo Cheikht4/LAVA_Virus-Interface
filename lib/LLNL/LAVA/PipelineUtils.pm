@@ -23,6 +23,7 @@ package LLNL::LAVA::PipelineUtils;
 use strict;
 use warnings;
 use Carp;
+$| = 1;  # Autoflush STDOUT pour un envoi en temps réel des logs et de la progression vers Flask
 
 use Exporter 'import';
 our @EXPORT_OK = qw(
@@ -43,11 +44,15 @@ our @EXPORT_OK = qw(
   calculateDynamicPairLengths
   reducePrimersByWindow
   buildNativeReversePool
+  getOligosWithMismatchTolerance
+  set_pipeline_threads
 );
 
 use LLNL::LAVA::Constants ":standard";
 use LLNL::LAVA::Options ":standard";
 use LLNL::LAVA::PrimerSet::PCRPair;
+use LLNL::LAVA::ForkManager;
+use LLNL::LAVA::Validator qw(checkPrimerMismatchTolerance isIUPACCompatible rev_comp generateIUPACCode validateCompleteSignatureSpacing);
 use Bio::SeqIO;
 use POSIX qw(floor);
 use Time::HiRes qw(time);
@@ -55,6 +60,13 @@ use IO::Handle;
 STDERR->autoflush(1);
 # Detection TTY pour barre en place (comme tqdm) / TTY detection for in-place bar (like tqdm)
 our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
+
+our $THREADS = 1;
+sub set_pipeline_threads {
+  my ($th) = @_;
+  $THREADS = $th if defined $th;
+}
+
 
 # Auto-detection de Term::ProgressBar (equivalent tqdm) / Auto-detect Term::ProgressBar (tqdm equivalent)
 # Si le module n'est pas installe, on utilise une barre ASCII maison sans dependance externe.
@@ -69,6 +81,11 @@ our $HAS_TERM_PROGRESSBAR = eval { require Term::ProgressBar; Term::ProgressBar-
 sub _make_progress_bar {
   my ($total, $label) = @_;
   $label //= "Traitement";
+  my $t0 = time();
+
+  # Émission immédiate de la ligne LAVA-PROGRESS à 0% dès le lancement de l'étape pour informer Flask
+  printf("[LAVA-PROGRESS] %s|0|%d||? it/s|0\n", $label, $total // 1);
+  my $old_handle = select(STDOUT); $| = 1; select($old_handle);
 
   if ($HAS_TERM_PROGRESSBAR && -t STDOUT) {
     # Mode riche : Term::ProgressBar avec ETA / Rich mode: Term::ProgressBar with ETA
@@ -80,10 +97,9 @@ sub _make_progress_bar {
       fh     => \*STDERR,
     });
     $bar->minor(0);
-    return { type => 'term', bar => $bar, total => $total, done => 0 };
+    return { type => 'term', bar => $bar, total => $total, done => 0, label => $label, t0 => $t0 };
   } else {
     # Mode fallback : barre ASCII maison / Fallback mode: built-in ASCII bar
-    my $t0 = time();
     return {
       type   => 'ascii',
       total  => $total,
@@ -104,30 +120,15 @@ sub _make_progress_bar {
 sub _update_progress {
   my ($bar_r, $done, $extra_r) = @_;
   $bar_r->{done} = $done;
-  my $total = $bar_r->{total};
+  my $total = $bar_r->{total} // 1;
 
-  if ($bar_r->{type} eq 'term') {
+  if ($bar_r->{type} eq 'term' && defined $bar_r->{bar}) {
     $bar_r->{bar}->update($done);
-    return;
   }
 
-  # Fallback ASCII : afficher toutes les 200 iterations ou a 100%
-  # Fallback ASCII: print every 200 iterations or at 100%
-  return if ($done % 200 != 0 && $done != $total);
-
+  # Nous ne filtrons plus les mises à jour par modulo 200 afin de ne pas masquer le suivi en temps réel sous Flask
   my $now     = time();
-  my $elapsed = $now - $bar_r->{t0} + 0.001;
-  my $pct     = $total > 0 ? int($done / $total * 100) : 0;
-  my $filled  = int($pct / 5);   # 20 segments
-  my $empty   = 20 - $filled;
-  my $bar_str = "#" x $filled . "-" x $empty;
-
-  my $eta_str = "";
-  if ($done > 0 && $done < $total) {
-    my $rate    = $done / $elapsed;
-    my $remain  = ($total - $done) / $rate;
-    $eta_str = sprintf(" ETA:%ds", int($remain));
-  }
+  my $elapsed = $now - ($bar_r->{t0} // $now) + 0.001;
 
   my $extra_str = "";
   if ($extra_r) {
@@ -138,14 +139,13 @@ sub _update_progress {
     $extra_str = " | " . join(" ", @parts) if @parts;
   }
 
-  # Emission vers STDOUT pour Flask (toujours, pas seulement en TTY)
-  # Emit to STDOUT for Flask (always, not only in TTY)
   my $rate_str = ($done > 0 && $elapsed > 0) ? sprintf('%.0f it/s', $done / $elapsed) : '? it/s';
   my $eta_val  = ($done > 0 && $done < $total && $elapsed > 0)
                  ? int(($total - $done) / ($done / $elapsed)) : 0;
   printf("[LAVA-PROGRESS] %s|%d|%d|%s|%s|%d\n",
          $bar_r->{label} // 'Reverse Validation', $done, $total,
          $extra_str, $rate_str, $eta_val);
+  my $old_handle = select(STDOUT); $| = 1; select($old_handle);
 }
 
 sub _finish_progress {
@@ -218,6 +218,151 @@ sub buildReversePrimers
 
 #-------------------------------------------------------------------------------
 
+=head2 getOligosWithMismatchTolerance
+
+  Version amelioree de getOligos qui integre la tolerance aux mismatches en multi-coeurs via ForkManager.
+  Improved version of getOligos that integrates mismatch tolerance using multi-core ForkManager.
+
+=cut
+
+sub getOligosWithMismatchTolerance {
+  my ($enumerator, $alignment, $min_match_percent, $min_iupac_percent, $min_primer_coverage,
+      $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen, $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency, $label, $threads) = @_;
+  
+  $label //= "Forward";
+  my $progress_label = "Validation $label";
+  my $num_threads = $threads // $THREADS // 1;
+  
+  my $sequenceCount = $alignment->num_sequences();
+  if ($sequenceCount <= 0) {
+    confess("data error - MSA must contain at least one sequence");
+  }
+  
+  print "INFO: Utilisation de la tolerance aux mismatches activee en multi-coeurs (threads: $num_threads)\n";
+  print "  - Seuil de concordance stricte / Strict match threshold: ${min_match_percent}%\n";
+  print "  - Seuil de couverture IUPAC / IUPAC coverage threshold: ${min_iupac_percent}%\n";
+  
+  my @sequences = ();
+  foreach my $sequence ($alignment->each_seq()) {
+    my $seqContent = $sequence->seq();
+    $seqContent = uc($seqContent);
+    $seqContent =~ s/[^ATCG]/N/g;
+    push @sequences, $seqContent;
+  }
+  
+  my @candidatePrimers = $enumerator->getOligos($alignment);
+  my @validatedPrimers = ();
+  my $strict_count = 0;
+  my $degenerate_count = 0;
+  my $rejected_count = 0;
+  
+  my $nb_fwd_candidates = scalar(@candidatePrimers);
+  print "INFO: Analyse de $nb_fwd_candidates amorces candidates Forward avec tolerance aux mismatches...\n";
+
+  if ($nb_fwd_candidates == 0) {
+    return ();
+  }
+
+  my $fwd_progress = _make_progress_bar($nb_fwd_candidates, $progress_label);
+  my $pm = LLNL::LAVA::ForkManager->new($num_threads);
+  my $n_chunks = $pm->{max_processes} * 12;
+  $n_chunks = 25 if $n_chunks < 25;
+  $n_chunks = $nb_fwd_candidates if $n_chunks > $nb_fwd_candidates;
+
+  $pm->run_on_finish(sub {
+    my ($pid, $exit_code, $ident, $signal, $core, $data_ref) = @_;
+    if (defined $data_ref && ref($data_ref) eq 'HASH') {
+      foreach my $msg (@{$data_ref->{logs} // []}) {
+        print $msg;
+      }
+      push @validatedPrimers, @{$data_ref->{validated} // []};
+      $strict_count     += $data_ref->{strict}   // 0;
+      $degenerate_count += $data_ref->{degen}    // 0;
+      $rejected_count   += $data_ref->{rejected} // 0;
+      _update_progress($fwd_progress, $strict_count + $degenerate_count + $rejected_count,
+        { strict => $strict_count, degen => $degenerate_count, rejected => $rejected_count });
+    }
+  });
+
+  my $chunk_size = int(($nb_fwd_candidates + $n_chunks - 1) / $n_chunks);
+  for my $chunk_id (0 .. $n_chunks - 1) {
+    my $start_idx = $chunk_id * $chunk_size;
+    last if $start_idx >= $nb_fwd_candidates;
+    my $end_idx = ($chunk_id + 1) * $chunk_size - 1;
+    $end_idx = $nb_fwd_candidates - 1 if $end_idx >= $nb_fwd_candidates;
+
+    my $pid = $pm->start($chunk_id);
+    next if $pid;
+
+    my @chunk_validated = ();
+    my @chunk_logs = ();
+    my $chunk_strict = 0;
+    my $chunk_degen  = 0;
+    my $chunk_reject = 0;
+
+    for my $i ($start_idx .. $end_idx) {
+      my $primer = $candidatePrimers[$i];
+      my $location = $primer->location();
+      my $length = $primer->length();
+      my $original_sequence = $primer->sequence();
+      
+      my ($final_sequence, $coverage_percent, $is_degenerate, $compatible_seq_ids) = 
+        checkPrimerMismatchTolerance(\@sequences, $location, $length, $original_sequence,
+                                    $min_match_percent, $min_iupac_percent, $min_primer_coverage,
+                                    $maxTotalDegen, $maxConsecDegen, 
+                                    $max3PrimeDegen, $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency);
+      
+      my $min_primer_acceptance = $min_primer_coverage;
+      if ($coverage_percent >= $min_primer_acceptance) {
+        my $validatedPrimer = $primer->clone();
+        
+        if ($is_degenerate) {
+          $validatedPrimer->sequence($final_sequence);
+          $validatedPrimer->setTag("is_degenerate", 1);
+          $validatedPrimer->setTag("original_sequence", $original_sequence);
+          $validatedPrimer->setTag("iupac_coverage", sprintf("%.1f", $coverage_percent));
+          $validatedPrimer->setTag("compatible_sequence_ids", $compatible_seq_ids);
+          $chunk_degen++;
+          push @chunk_logs, "DEGENERATE PRIMER acceptee - Pos: $location, Couv: " . sprintf("%.1f", $coverage_percent) . "%, Seq: $final_sequence\n";
+        } else {
+          $validatedPrimer->setTag("is_degenerate", 0);
+          $validatedPrimer->setTag("iupac_coverage", "100.0");
+          $validatedPrimer->setTag("compatible_sequence_ids", $compatible_seq_ids);
+          $chunk_strict++;
+          push @chunk_logs, "STRICT PRIMER acceptee     - Pos: $location, Couv: 100.0%, Seq: $final_sequence\n" if ($chunk_strict <= 10);
+        }
+        push @chunk_validated, $validatedPrimer;
+      } else {
+        $chunk_reject++;
+        push @chunk_logs, "REJECTED PRIMER - Pos: $location, Couv: " . sprintf("%.1f", $coverage_percent) . "% < ${min_primer_acceptance}%\n" if ($chunk_reject <= 5);
+      }
+    }
+
+    $pm->finish(0, {
+      validated => \@chunk_validated,
+      logs      => \@chunk_logs,
+      strict    => $chunk_strict,
+      degen     => $chunk_degen,
+      rejected  => $chunk_reject
+    });
+  }
+
+  $pm->wait_all_children();
+  @validatedPrimers = sort { $a->location() <=> $b->location() || $a->length() <=> $b->length() } @validatedPrimers;
+
+  _finish_progress($fwd_progress);
+  print "  [Forward] Resultats / Results:\n";
+  print "    - Strictes / Strict: $strict_count\n";
+  print "    - Degenerees / Degenerate: $degenerate_count\n";
+  print "    - Rejetees / Rejected: $rejected_count\n";
+  print "    - Total valide / Total validated: " . scalar(@validatedPrimers) . "/" . scalar(@candidatePrimers) . "\n\n";
+
+  return @validatedPrimers;
+}
+
+#-------------------------------------------------------------------------------
+
+
 =head2 buildNativeReversePool
 
   Option B - Generation native des amorces Reverse.
@@ -248,7 +393,11 @@ sub buildNativeReversePool {
       $min_match_percent, $min_iupac_percent, $min_primer_coverage,
       $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen,
       $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency,
-      $checkPrimerMismatchTolerance_ref, $isIUPACCompatible_ref, $rev_comp_ref) = @_;
+      $checkPrimerMismatchTolerance_ref, $isIUPACCompatible_ref, $rev_comp_ref, $label, $threads) = @_;
+
+  $label //= "Reverse";
+  my $progress_label = "Validation $label";
+  my $num_threads = $threads // $THREADS // 1;
 
   # --- 1. Construire le RC de l alignement complet ---
   # Build the RC of the full alignment
@@ -296,70 +445,105 @@ sub buildNativeReversePool {
   my $rejected_count = 0;
 
   my $nb_rev_candidates = scalar(@candidatePrimers);
-  print "INFO: [NativeReverse] Analyse de $nb_rev_candidates amorces candidates Reverse...\n";
+  print "INFO: [NativeReverse] Analyse de $nb_rev_candidates amorces candidates Reverse en multi-coeurs (threads: $num_threads)...\n";
   print "  - Strict match: ${min_match_percent}% | IUPAC: ${min_iupac_percent}% | Coverage: ${min_primer_coverage}%\n";
   print "  - MaxDegen: $maxTotalDegen total / $max3PrimeDegen au 3prime\n";
 
-  # Barre de progression / Progress bar (Term::ProgressBar ou fallback ASCII)
-  my $rev_progress = _make_progress_bar($nb_rev_candidates, "Reverse Validation");
-
-  foreach my $primer (@candidatePrimers) {
-    my $posInRC  = $primer->location();  # Position 0-indexee dans RC(Seq1)
-    my $length   = $primer->length();
-    my $origSeq  = $primer->sequence();
-
-    # Validation contre les sequences RC avec tous les parametres identiques aux Forward
-    # Validation against RC sequences with identical parameters as Forward primers
-    my ($finalSeq, $coveragePct, $isDegenerate, $compatibleIds) =
-      $checkPrimerMismatchTolerance_ref->(
-        \@rcSequences, $posInRC, $length, $origSeq,
-        $min_match_percent, $min_iupac_percent, $min_primer_coverage,
-        $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen,
-        $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency
-      );
-
-    # --- 5. Convertir la position RC -> position genome original ---
-    # RC position p -> original genome position: alignmentLength - 1 - p (5' du brin -)
-    my $genomicLocation = $alignmentLength - 1 - $posInRC;
-
-    # Meme logique de rejet/acceptation que getOligosWithMismatchTolerance
-    # Same rejection/acceptance logic as getOligosWithMismatchTolerance
-    if ($coveragePct >= $min_primer_coverage) {
-      # Creer l objet Oligo natif en orientation minus / Create native Oligo in minus orientation
-      my $validatedPrimer = $primer->clone();
-      $validatedPrimer->sequence($finalSeq);
-      $validatedPrimer->location($genomicLocation);   # 5' du brin -, coordonnee originale
-      $validatedPrimer->setTag("strand", "minus");    # Brin moins natif
-
-      if ($isDegenerate) {
-        $validatedPrimer->setTag("is_degenerate", 1);
-        $validatedPrimer->setTag("original_sequence", $origSeq);
-        $validatedPrimer->setTag("iupac_coverage", sprintf("%.1f", $coveragePct));
-        $validatedPrimer->setTag("compatible_sequence_ids", $compatibleIds);
-        $degen_count++;
-        print "REVERSE DEGENERATE acceptee - PosRC: $posInRC -> GenomPos: $genomicLocation, Couv: " .
-              sprintf("%.1f", $coveragePct) . "%, Seq: $finalSeq\n";
-        _update_progress($rev_progress, $strict_count+$degen_count+$rejected_count,
-          { strict=>$strict_count, degen=>$degen_count, rejected=>$rejected_count });
-      } else {
-        $validatedPrimer->setTag("is_degenerate", 0);
-        $validatedPrimer->setTag("iupac_coverage", "100.0");
-        $validatedPrimer->setTag("compatible_sequence_ids", $compatibleIds);
-        $strict_count++;
-        print "REVERSE STRICT acceptee   - PosRC: $posInRC -> GenomPos: $genomicLocation, Couv: 100.0%, Seq: $finalSeq\n";
-        _update_progress($rev_progress, $strict_count+$degen_count+$rejected_count,
-          { strict=>$strict_count, degen=>$degen_count, rejected=>$rejected_count });
-      }
-
-      push @validatedPrimers, $validatedPrimer;
-    } else {
-      $rejected_count++;
-      print "REVERSE REJECTED           - PosRC: $posInRC -> GenomPos: $genomicLocation, Couv: " .
-            sprintf("%.1f", $coveragePct) . "% < ${min_primer_coverage}%\n";
-      _update_progress($rev_progress, $strict_count+$degen_count+$rejected_count,
-        { strict=>$strict_count, degen=>$degen_count, rejected=>$rejected_count });
-    }
+  if ($nb_rev_candidates == 0) {
+    return ();
   }
+
+  my $rev_progress = _make_progress_bar($nb_rev_candidates, $progress_label);
+  my $pm = LLNL::LAVA::ForkManager->new($num_threads);
+  my $n_chunks = $pm->{max_processes} * 12;
+  $n_chunks = 25 if $n_chunks < 25;
+  $n_chunks = $nb_rev_candidates if $n_chunks > $nb_rev_candidates;
+
+  $pm->run_on_finish(sub {
+    my ($pid, $exit_code, $ident, $signal, $core, $data_ref) = @_;
+    if (defined $data_ref && ref($data_ref) eq 'HASH') {
+      foreach my $msg (@{$data_ref->{logs} // []}) {
+        print $msg;
+      }
+      push @validatedPrimers, @{$data_ref->{validated} // []};
+      $strict_count   += $data_ref->{strict}   // 0;
+      $degen_count    += $data_ref->{degen}    // 0;
+      $rejected_count += $data_ref->{rejected} // 0;
+      _update_progress($rev_progress, $strict_count + $degen_count + $rejected_count,
+        { strict => $strict_count, degen => $degen_count, rejected => $rejected_count });
+    }
+  });
+
+  my $chunk_size = int(($nb_rev_candidates + $n_chunks - 1) / $n_chunks);
+  for my $chunk_id (0 .. $n_chunks - 1) {
+    my $start_idx = $chunk_id * $chunk_size;
+    last if $start_idx >= $nb_rev_candidates;
+    my $end_idx = ($chunk_id + 1) * $chunk_size - 1;
+    $end_idx = $nb_rev_candidates - 1 if $end_idx >= $nb_rev_candidates;
+
+    my $pid = $pm->start($chunk_id);
+    next if $pid;
+
+    my @chunk_validated = ();
+    my @chunk_logs = ();
+    my $chunk_strict = 0;
+    my $chunk_degen  = 0;
+    my $chunk_reject = 0;
+
+    for my $i ($start_idx .. $end_idx) {
+      my $primer = $candidatePrimers[$i];
+      my $posInRC  = $primer->location();
+      my $length   = $primer->length();
+      my $origSeq  = $primer->sequence();
+
+      my ($finalSeq, $coveragePct, $isDegenerate, $compatibleIds) =
+        $checkPrimerMismatchTolerance_ref->(
+          \@rcSequences, $posInRC, $length, $origSeq,
+          $min_match_percent, $min_iupac_percent, $min_primer_coverage,
+          $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen,
+          $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency
+        );
+
+      my $genomicLocation = $alignmentLength - 1 - $posInRC;
+
+      if ($coveragePct >= $min_primer_coverage) {
+        my $validatedPrimer = $primer->clone();
+        $validatedPrimer->sequence($finalSeq);
+        $validatedPrimer->location($genomicLocation);
+        $validatedPrimer->setTag("strand", "minus");
+
+        if ($isDegenerate) {
+          $validatedPrimer->setTag("is_degenerate", 1);
+          $validatedPrimer->setTag("original_sequence", $origSeq);
+          $validatedPrimer->setTag("iupac_coverage", sprintf("%.1f", $coveragePct));
+          $validatedPrimer->setTag("compatible_sequence_ids", $compatibleIds);
+          $chunk_degen++;
+          push @chunk_logs, "REVERSE DEGENERATE acceptee - PosRC: $posInRC -> GenomPos: $genomicLocation, Couv: " . sprintf("%.1f", $coveragePct) . "%, Seq: $finalSeq\n";
+        } else {
+          $validatedPrimer->setTag("is_degenerate", 0);
+          $validatedPrimer->setTag("iupac_coverage", "100.0");
+          $validatedPrimer->setTag("compatible_sequence_ids", $compatibleIds);
+          $chunk_strict++;
+          push @chunk_logs, "REVERSE STRICT acceptee   - PosRC: $posInRC -> GenomPos: $genomicLocation, Couv: 100.0%, Seq: $finalSeq\n";
+        }
+        push @chunk_validated, $validatedPrimer;
+      } else {
+        $chunk_reject++;
+        push @chunk_logs, "REVERSE REJECTED           - PosRC: $posInRC -> GenomPos: $genomicLocation, Couv: " . sprintf("%.1f", $coveragePct) . "% < ${min_primer_coverage}%\n" if ($chunk_reject <= 5);
+      }
+    }
+
+    $pm->finish(0, {
+      validated => \@chunk_validated,
+      logs      => \@chunk_logs,
+      strict    => $chunk_strict,
+      degen     => $chunk_degen,
+      rejected  => $chunk_reject
+    });
+  }
+
+  $pm->wait_all_children();
+  @validatedPrimers = sort { $a->location() <=> $b->location() || $a->length() <=> $b->length() } @validatedPrimers;
 
   _finish_progress($rev_progress);
   print "  [NativeReverse] Resultats / Results:\n";
