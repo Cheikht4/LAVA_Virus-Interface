@@ -41,12 +41,14 @@ TRANSLATIONS = {
         'general_params': 'Paramètres généraux',
         'max_signature_length': 'Longueur max signature',
         'max_primers_generated': 'Max primers générés',
-        'match_minimum': '% Match minimum',
-        'match_minimum_desc': 'Correspondance stricte minimum',
-        'match_after_iupac': '% Match après IUPAC',
-        'match_after_iupac_desc': 'Match après bases dégénérées',
-        'primer_elimination': '% Élimination primer',
-        'primer_elimination_desc': 'Seuil d\'élimination final',
+        'match_minimum': 'Seuil de dégénérescence par position (%)',
+        'match_minimum_desc': 'Si moins de X % des séquences portent la base de l\'amorce à une position, cette position devient candidate à la dégénérescence.',
+        'match_after_iupac': 'Couverture minimale du code IUPAC (%)',
+        'match_after_iupac_desc': 'Une position candidate n\'est dégénérée que si le code IUPAC couvre au moins X % des séquences, sinon la dégénérescence n\'en vaut pas la peine.',
+        'primer_elimination': 'Couverture minimale de l\'amorce (%)',
+        'primer_elimination_desc': 'Une amorce dont la couverture finale reste sous X % est rejetée.',
+        'per_position_header': 'Par position',
+        'per_primer_header': 'Par amorce',
         'min_noise_freq': 'Fréquence min. bruit',
         'min_noise_freq_desc': 'Ignorer bases < X% (défaut 5%)',
         'outer_primers': 'Outer Primers (F3/B3)',
@@ -98,12 +100,17 @@ TRANSLATIONS = {
         'max_dist_middle_inner': 'Dist. Max Middle-Inner',
         'penalty_plateau': 'Plateau de Pénalité (0.1-0.5)',
         'penalty_slope': 'Pente Sigmoïde (0.05-0.5)',
+        'stem_orientation': 'Orientation STEM',
+        'stem_orientation_conventional': '0 (Conventionnel - Original)',
+        'stem_orientation_opposite': '1 (Opposé)',
         # Clés manquantes / Missing keys
         'resolve_overlap_label': 'Priorité de Dédoublonnage (Chevauchement)',
         'resolve_overlap_penalty': 'Pénalité Biochimique et Géométrique (Défaut/Sûr)',
         'resolve_overlap_coverage': 'Pourcentage de Couverture (Universalité)',
         'resolve_overlap_desc': 'Critère utilisé pour garder le "champion" d\'une région ciblée par plusieurs signatures.',
         'penalty_plateau_desc': 'Ratio zone "confort" (ex: 0.25)',
+        'threads_label': 'Nombre de cœurs / Threads (--threads)',
+        'threads_desc': "Nombre de cœurs CPU alloués ('auto' ou entier ex: 4).",
         'penalty_slope_desc': 'Pente sigmoïde (ex: 0.15)',
         'min_signatures_desc': '% minimum de séquences cibles que la signature doit amplifier. Ex: 1 = tolérant, 70 = strict.',
         'spatial_reduction_title': 'Réduction spatiale des candidats',
@@ -230,12 +237,14 @@ TRANSLATIONS = {
         'general_params': 'General parameters',
         'max_signature_length': 'Max signature length',
         'max_primers_generated': 'Max primers generated',
-        'match_minimum': '% Minimum match',
-        'match_minimum_desc': 'Minimum strict match',
-        'match_after_iupac': '% Match after IUPAC',
-        'match_after_iupac_desc': 'Match after degenerate bases',
-        'primer_elimination': '% Primer elimination',
-        'primer_elimination_desc': 'Final elimination threshold',
+        'match_minimum': 'Per-position degeneracy threshold (%)',
+        'match_minimum_desc': 'If fewer than X % of sequences carry the primer base at a position, that position becomes a candidate for degeneracy.',
+        'match_after_iupac': 'Minimum IUPAC code coverage (%)',
+        'match_after_iupac_desc': 'A candidate position is degenerated only if the IUPAC code covers at least X % of sequences, otherwise degeneracy is not worthwhile.',
+        'primer_elimination': 'Minimum primer coverage (%)',
+        'primer_elimination_desc': 'A primer whose final coverage stays below X % is rejected.',
+        'per_position_header': 'Per position',
+        'per_primer_header': 'Per primer',
         'min_noise_freq': 'Min noise frequency',
         'min_noise_freq_desc': 'Ignore bases < X% (default 5%)',
         'outer_primers': 'Outer Primers (F3/B3)',
@@ -247,6 +256,12 @@ TRANSLATIONS = {
         'target_tm': 'Target Tm (°C)',
         'min_tm': 'Min Tm (°C)',
         'max_tm': 'Max Tm (°C)',
+        'stem_target_tm': 'Target Tm',
+        'stem_min_tm': 'Min Tm',
+        'stem_max_tm': 'Max Tm',
+        'stem_orientation': 'STEM Orientation',
+        'stem_orientation_conventional': '0 (Conventional)',
+        'stem_orientation_opposite': '1 (Opposite)',
         'loop_advanced_params': 'Advanced LOOP parameters',
         'loop_target_length': 'LOOP target length',
         'loop_min_length': 'LOOP min length',
@@ -293,6 +308,8 @@ TRANSLATIONS = {
         'resolve_overlap_coverage': 'Coverage Percentage (Universality)',
         'resolve_overlap_desc': 'Criterion used to keep the "champion" of a region targeted by multiple signatures.',
         'penalty_plateau_desc': '"Comfort zone" ratio (e.g. 0.25)',
+        'threads_label': 'CPU Cores / Threads (--threads)',
+        'threads_desc': "Number of allocated CPU cores ('auto' or integer e.g. 4).",
         'penalty_slope_desc': 'Sigmoid slope (e.g. 0.15)',
         'min_signatures_desc': 'Minimum % of target sequences the signature must amplify. E.g. 1 = tolerant, 70 = strict.',
         'spatial_reduction_title': 'Spatial Candidate Reduction',
@@ -536,9 +553,38 @@ FLOAT_PARAMS = {
     'min_primer_coverage', 'max_overlap_percent'
 }
 
+def _validate_and_cap_threads(val):
+    """Valide et plafonne le nombre de threads/cœurs demandé (Priorité 1 & 2).
+    Validates and caps requested CPU threads to prevent DoS and core oversubscription."""
+    cpu_count = os.cpu_count() or 4
+    
+    # Plafond administrateur (par défaut: tous les cœurs sauf 1 pour le système, min 1)
+    default_admin_cap = max(1, cpu_count - 1)
+    try:
+        admin_cap = int(os.environ.get('MAX_THREADS_PER_RUN', default_admin_cap))
+    except (ValueError, TypeError):
+        admin_cap = default_admin_cap
+        
+    effective_cap = max(1, admin_cap)
+    
+    # Mode automatique : allouer par défaut le plafond raisonnable disponible
+    if isinstance(val, str) and val.strip().lower() == 'auto':
+        return effective_cap
+        
+    # Mode entier explicite : borner entre 1 et le plafond maximal autorisé (admin_cap)
+    try:
+        n = int(val)
+        if n <= 0:
+            return effective_cap
+        return max(1, min(n, effective_cap))
+    except (ValueError, TypeError):
+        return effective_cap
+
 def _convert_param_value(key, value):
     """Convertit une valeur de paramètre au bon type (float, int ou str).
     Converts a parameter value to the correct type (float, int, or str)."""
+    if key in ('threads', 'cpu'):
+        return _validate_and_cap_threads(value)
     is_float = (key in FLOAT_PARAMS or 
                 any(hint in key for hint in ('tm', 'percent', 'coverage', 'conc', 
                                               'salt', 'frequency', 'slope', 
@@ -599,6 +645,8 @@ def get_default_params():
         'max_poly_bases': 2,
         'min_signatures_for_success': 1,
         'max_overlap_percent': 0,
+        'stem_orientation': 0,
+        'threads': 'auto',
         # Reduction spatiale par fenetre / Spatial window reduction
         'window_size': 0,        # 0 = desactive, ex: 5 = fenetre de 5nt
         'max_per_window': 0,     # 0 = desactive, ex: 3 = 3 candidats max par fenetre
@@ -789,6 +837,8 @@ def upload_params_file():
             'minimum_primer_coverage': 'min_primer_coverage', 
             'minimum_signature_coverage': 'min_signature_coverage',
             'mismatch_tolerance': 'primer_min_match_percent',
+            'primer_min_iupac_percent': 'primer_iupac_min_percent',
+            'primer_min_coverage_percent': 'min_primer_coverage',
         }
         reverse_mapping = {v: k for k, v in param_mapping.items()}
         
@@ -1032,19 +1082,23 @@ def execute_lava_background(execution_id, script_type, input_file, output_name, 
             'minimum_primer_coverage': 'min_primer_coverage', 
             'minimum_signature_coverage': 'min_signature_coverage',
             'mismatch_tolerance': 'primer_min_match_percent',
+            'primer_min_iupac_percent': 'primer_iupac_min_percent',
+            'primer_min_coverage_percent': 'min_primer_coverage',
             'signature_max_length': 'signature_max_length',
             'max_primer_gen': 'max_primer_gen',
             'primer_min_match_percent': 'primer_min_match_percent',
             'primer_iupac_min_percent': 'primer_iupac_min_percent',
             'min_primer_coverage': 'min_primer_coverage',
-            'min_base_frequency': 'min_base_frequency'
+            'min_base_frequency': 'min_base_frequency',
+            'threads': 'threads',
+            'cpu': 'threads'
         }
         
         # Paramètres valides pour les scripts Perl (pour filtrer les invalides)
         # Paramètres communs (utilisés par LOOP et STEM)
         common_params = {
             'signature_max_length', 'max_primer_gen', 'primer_min_match_percent',
-            'primer_iupac_min_percent', 'min_primer_coverage', 'min_base_frequency',
+            'primer_iupac_min_percent', 'primer_min_iupac_percent', 'min_primer_coverage', 'primer_min_coverage_percent', 'min_base_frequency',
             'min_signatures_for_success', 'max_overlap_percent', 'resolve_overlap_by',
             'primer3_executable', 'thermodynamic_path', 'alignment_format',
             'dntp_conc', 'dna_conc', 'salt_monovalent', 'salt_divalent',
@@ -1068,6 +1122,8 @@ def execute_lava_background(execution_id, script_type, input_file, output_name, 
             'max_dist_outer_middle', 'max_dist_middle_inner',
             # Reduction spatiale par fenetre / Spatial window reduction
             'window_size', 'max_per_window',
+            # Parallélisation multi-cœurs / Multi-core parallelization
+            'threads',
         }
 
         # Paramètres spécifiques à LOOP
@@ -1081,7 +1137,7 @@ def execute_lava_background(execution_id, script_type, input_file, output_name, 
         stem_only_params = {
             'include_stem_primers', 'min_primer_spacing', 'min_inner_pair_spacing',
             'stem_primer_target_length', 'stem_primer_min_length', 'stem_primer_max_length',
-            'stem_primer_target_tm', 'stem_primer_min_tm', 'stem_primer_max_tm',
+            'stem_primer_target_tm', 'stem_primer_min_tm', 'stem_primer_max_tm', 'stem_orientation',
         }
         
         # Sélectionner les paramètres valides selon le script
@@ -1104,6 +1160,8 @@ def execute_lava_background(execution_id, script_type, input_file, output_name, 
                 
                 # Seulement ajouter si c'est un paramètre valide pour Perl
                 if perl_param_name in valid_perl_params:
+                    if perl_param_name in ('threads', 'cpu'):
+                        param_value = _validate_and_cap_threads(param_value)
                     cmd.extend([f"--{perl_param_name}", str(param_value)])
                 else:
                     print(f"⚠️  Paramètre ignoré (non supporté par Perl): {param_name} -> {perl_param_name}")
@@ -1352,6 +1410,10 @@ def execute_lava():
             else:
                 session['params'][key] = _convert_param_value(key, value)
     
+    # Priorité 1 & 2 : Re-valider et borner systématiquement threads avant exécution
+    if 'threads' in session['params']:
+        session['params']['threads'] = _validate_and_cap_threads(session['params']['threads'])
+    session.modified = True
 
     execution_id = str(uuid.uuid4())
     

@@ -134,25 +134,21 @@
                                     value="{{ params.max_primer_gen }}" min="100" max="20000">
                             </div>
                         </div>
-                        <div class="row mt-3">
-                            <div class="col-md-4">
+                        <hr class="my-3 text-muted">
+                        <h6 class="text-secondary mb-3"><i class="fas fa-layer-group me-2"></i>{{ 'per_position_header'|t }}</h6>
+                        <div class="row">
+                            <div class="col-md-6">
                                 <label for="primer_min_match_percent" class="form-label">{{ 'match_minimum'|t }}</label>
                                 <input type="number" class="form-control" name="primer_min_match_percent"
                                     value="{{ params.primer_min_match_percent }}" min="50" max="100">
                                 <div class="form-text">{{ 'match_minimum_desc'|t }}</div>
                             </div>
-                            <div class="col-md-4">
+                            <div class="col-md-6">
                                 <label for="primer_iupac_min_percent" class="form-label">{{ 'match_after_iupac'|t
                                     }}</label>
                                 <input type="number" class="form-control" name="primer_iupac_min_percent"
                                     value="{{ params.primer_iupac_min_percent }}" min="50" max="100">
                                 <div class="form-text">{{ 'match_after_iupac_desc'|t }}</div>
-                            </div>
-                            <div class="col-md-4">
-                                <label for="min_primer_coverage" class="form-label">{{ 'primer_elimination'|t }}</label>
-                                <input type="number" class="form-control" name="min_primer_coverage"
-                                    value="{{ params.min_primer_coverage }}" min="50" max="100">
-                                <div class="form-text">{{ 'primer_elimination_desc'|t }}</div>
                             </div>
                         </div>
                         <div class="row mt-3">
@@ -164,6 +160,16 @@
                                     <span class="input-group-text"><i class="fas fa-filter"></i></span>
                                 </div>
                                 <div class="form-text">{{ 'min_noise_freq_desc'|t }}</div>
+                            </div>
+                        </div>
+                        <hr class="my-3 text-muted">
+                        <h6 class="text-secondary mb-3"><i class="fas fa-check-double me-2"></i>{{ 'per_primer_header'|t }}</h6>
+                        <div class="row">
+                            <div class="col-md-12">
+                                <label for="min_primer_coverage" class="form-label">{{ 'primer_elimination'|t }}</label>
+                                <input type="number" class="form-control" name="min_primer_coverage"
+                                    value="{{ params.min_primer_coverage }}" min="50" max="100">
+                                <div class="form-text">{{ 'primer_elimination_desc'|t }}</div>
                             </div>
                         </div>
                     </div>
@@ -343,7 +349,7 @@
                                     value="{{ params.stem_primer_max_length }}" min="18" max="35">
                             </div>
                         </div>
-                        <div class="row">
+                        <div class="row mb-3">
                             <div class="col-md-4">
                                 <label class="form-label">{{ 'stem_target_tm'|t }}</label>
                                 <input type="number" step="0.5" class="form-control" name="stem_primer_target_tm"
@@ -358,6 +364,15 @@
                                 <label class="form-label">{{ 'stem_max_tm'|t }}</label>
                                 <input type="number" step="0.5" class="form-control" name="stem_primer_max_tm"
                                     value="{{ params.stem_primer_max_tm }}" min="50" max="70">
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-12">
+                                <label class="form-label">{{ 'stem_orientation'|t }}</label>
+                                <select class="form-select" name="stem_orientation">
+                                    <option value="0" {{ 'selected' if params.stem_orientation == 0 }}>{{ 'stem_orientation_conventional'|t }}</option>
+                                    <option value="1" {{ 'selected' if params.stem_orientation == 1 }}>{{ 'stem_orientation_opposite'|t }}</option>
+                                </select>
                             </div>
                         </div>
                     </div>
@@ -505,6 +520,12 @@
                                                 name="min_signatures_for_success"
                                                 value="{{ params.min_signatures_for_success }}" min="1" max="100">
                                             <div class="form-text x-small">{{ 'min_signatures_desc'|t }}</div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small">{{ 'threads_label'|t }}</label>
+                                            <input type="text" class="form-control form-control-sm"
+                                                name="threads" value="{{ params.threads }}" placeholder="auto">
+                                            <div class="form-text x-small">{{ 'threads_desc'|t }}</div>
                                         </div>
                                     </div>
                                     <hr>
