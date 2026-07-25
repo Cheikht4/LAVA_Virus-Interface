@@ -46,12 +46,16 @@ our @EXPORT_OK = qw(
   buildNativeReversePool
   getOligosWithMismatchTolerance
   set_pipeline_threads
+  injectFixedPrimers
+  findPrimerPositionInAlignment
+  computeFixedPrimerWindows
 );
 
 use LLNL::LAVA::Constants ":standard";
 use LLNL::LAVA::Options ":standard";
 use LLNL::LAVA::PrimerSet::PCRPair;
 use LLNL::LAVA::ForkManager;
+use LLNL::LAVA::Oligo;
 use LLNL::LAVA::Validator qw(checkPrimerMismatchTolerance isIUPACCompatible rev_comp generateIUPACCode validateCompleteSignatureSpacing);
 use Bio::SeqIO;
 use POSIX qw(floor);
@@ -250,7 +254,38 @@ sub getOligosWithMismatchTolerance {
     push @sequences, $seqContent;
   }
   
-  my @candidatePrimers = $enumerator->getOligos($alignment);
+  # LAVA 2026: Fractionnement physique pour éviter le bug d'INCLUDED_REGION ignoré par Primer3
+  my $original_included_region = $enumerator->{"d_primer3Targets"}->{"INCLUDED_REGION"};
+  my $slice_offset = 0;
+  my $targetAlignment = $alignment;
+  
+  if ($original_included_region) {
+    my ($start, $len) = split(/,/, $original_included_region);
+    my $slice_start_1based = $start + 1;
+    my $slice_end_1based   = $start + $len;
+    my $alignmentLength    = $alignment->length();
+    
+    if ($slice_end_1based > $alignmentLength) { $slice_end_1based = $alignmentLength; }
+    
+    $targetAlignment = $alignment->slice($slice_start_1based, $slice_end_1based);
+    $slice_offset = $start;
+    
+    print "  [$label] Fractionnement physique de l'alignement : $slice_start_1based à $slice_end_1based\n";
+    delete $enumerator->{"d_primer3Targets"}->{"INCLUDED_REGION"};
+  }
+
+  my @candidatePrimers = $enumerator->getOligos($targetAlignment);
+  
+  if ($original_included_region) {
+    $enumerator->{"d_primer3Targets"}->{"INCLUDED_REGION"} = $original_included_region;
+  }
+  
+  if ($slice_offset > 0) {
+      foreach my $primer (@candidatePrimers) {
+          my $local_loc = $primer->location();
+          $primer->location($local_loc + $slice_offset);
+      }
+  }
   my @validatedPrimers = ();
   my $strict_count = 0;
   my $degenerate_count = 0;
@@ -434,7 +469,53 @@ sub buildNativeReversePool {
 
   # --- 3. Lancer Primer3 sur le RC de l alignement ---
   # Run Primer3 on the RC alignment (generates native minus-strand primers)
-  my @candidatePrimers = $enumerator->getOligos($rcAlignment);
+  
+  # LAVA 2026: Au lieu de faire confiance au paramètre INCLUDED_REGION (qui est ignoré
+  # silencieusement par Primer3 v2.6 pour les amorces internes pick_hyb_probe_only),
+  # on fractionne (slice) physiquement l'alignement RC, comme suggéré !
+  
+  my $original_included_region = $enumerator->{"d_primer3Targets"}->{"INCLUDED_REGION"};
+  my $rc_slice_offset = 0;
+  my $targetAlignment = $rcAlignment;
+  
+  if ($original_included_region) {
+    my ($start, $len) = split(/,/, $original_included_region);
+    # BioPerl/Primer3 utilise des coordonnées 0-based.
+    # Ex: alignment = 11039 bases. start = 4128, len = 1201.
+    # Fin de la region sur brin plus = start + len = 4128 + 1201 = 5329.
+    # Nouveau start sur RC = alignmentLength - fin = 11039 - 5329 = 5710.
+    my $rc_start = $alignmentLength - ($start + $len);
+    if ($rc_start < 0) { $rc_start = 0; }
+    
+    # Bio::SimpleAlign->slice est 1-based et inclusif
+    my $slice_start_1based = $rc_start + 1;
+    my $slice_end_1based   = $rc_start + $len;
+    if ($slice_end_1based > $alignmentLength) { $slice_end_1based = $alignmentLength; }
+    
+    # FRACTIONNEMENT PHYSIQUE !
+    $targetAlignment = $rcAlignment->slice($slice_start_1based, $slice_end_1based);
+    $rc_slice_offset = $rc_start;
+    
+    print "  [NativeReverse] Fractionnement physique de l'alignement RC : $slice_start_1based à $slice_end_1based\n";
+    
+    # On supprime temporairement INCLUDED_REGION pour ne pas embrouiller Primer3
+    delete $enumerator->{"d_primer3Targets"}->{"INCLUDED_REGION"};
+  }
+
+  my @candidatePrimers = $enumerator->getOligos($targetAlignment);
+  
+  # Restaurer INCLUDED_REGION
+  if ($original_included_region) {
+    $enumerator->{"d_primer3Targets"}->{"INCLUDED_REGION"} = $original_included_region;
+  }
+  
+  # AJUSTER LES COORDONNÉES DES CANDIDATS (car elles sont relatives au sous-alignement)
+  if ($rc_slice_offset > 0) {
+      foreach my $primer (@candidatePrimers) {
+          my $local_loc = $primer->location();
+          $primer->location($local_loc + $rc_slice_offset);
+      }
+  }
   print "  [NativeReverse] Primer3 a genere / generated " . scalar(@candidatePrimers) . " candidats sur RC MSA\n";
 
   # --- 4. Valider chaque candidat contre les sequences RC ---
@@ -1932,6 +2013,402 @@ sub createAmplificationFiles {
   return ($amplified_file, $excluded_file);
 }
 
+#-------------------------------------------------------------------------------
+
+=head2 findPrimerPositionInAlignment
+
+  Cherche la position 0-indexee d une sequence d amorce dans un MSA BioPerl.
+  Searches for the 0-indexed position of a primer sequence in a BioPerl MSA.
+
+  Strategie / Strategy:
+    1. Essai a la position optionnelle fournie (substring exact).
+       Try at the optional supplied position (exact substring).
+    2. Si non trouve (ou position non fournie), scan complet de chaque sequence du MSA.
+       If not found (or no position given), full scan of each MSA sequence.
+    3. Essai egalement avec le reverse-complement de la sequence.
+       Also tries the reverse complement of the sequence.
+
+  Retourne / Returns:
+    ($position, $strand) ou (undef, undef) si introuvable.
+    ($position, $strand) or (undef, undef) if not found.
+    $strand = "plus" ou "minus" (RC).
+
+=cut
+
+sub findPrimerPositionInAlignment {
+  my ($alignment, $primer_seq, $hint_position) = @_;
+
+  my $primer_uc  = uc($primer_seq);
+  my $primer_rc  = uc(rev_comp($primer_seq));
+
+  # Helper pour convertir une chaine IUPAC en regex / Helper to convert IUPAC string to regex
+  my $iupac_to_regex = sub {
+    my $seq = shift;
+    $seq =~ s/R/[AG]/g;
+    $seq =~ s/Y/[CT]/g;
+    $seq =~ s/S/[CG]/g;
+    $seq =~ s/W/[AT]/g;
+    $seq =~ s/K/[GT]/g;
+    $seq =~ s/M/[AC]/g;
+    $seq =~ s/B/[CGT]/g;
+    $seq =~ s/D/[AGT]/g;
+    $seq =~ s/H/[ACT]/g;
+    $seq =~ s/V/[ACG]/g;
+    $seq =~ s/N/[ACGT]/g;
+    return qr/$seq/;
+  };
+
+  my $regex_plus  = $iupac_to_regex->($primer_uc);
+  my $regex_minus = $iupac_to_regex->($primer_rc);
+
+  # Fonction interne de recherche dans une sequence alignee (avec et sans gaps)
+  # Internal helper: search in an aligned sequence (with and without gaps)
+  my $scan_seq = sub {
+    my ($aln_seq_raw) = @_;
+    my $aln_seq_uc = uc($aln_seq_raw);
+
+    # Recherche directe (brin plus) / Direct search (plus strand)
+    if ($aln_seq_uc =~ /$regex_plus/) {
+      return ($-[0], "plus");
+    }
+
+    # Recherche du reverse complement (brin moins) / Reverse complement search (minus strand)
+    if ($aln_seq_uc =~ /$regex_minus/) {
+      return ($-[0], "minus");
+    }
+
+    return (undef, undef);
+  };
+
+  # --- Etape 1 : essai a la position fournie ---
+  # --- Step 1: try at the supplied hint position ---
+  if (defined $hint_position) {
+    foreach my $seq ($alignment->each_seq()) {
+      my $aln_str = uc($seq->seq());
+      my $len     = length($primer_uc);
+
+      if ($hint_position + $len <= length($aln_str)) {
+        my $region = substr($aln_str, $hint_position, $len);
+        if ($region =~ /^$regex_plus$/) {
+          print "[FIXED PRIMER] Sequence trouvee a la position fournie $hint_position (brin +).\n";
+          print "[FIXED PRIMER] Sequence found at supplied position $hint_position (+ strand).\n";
+          return ($hint_position, "plus");
+        }
+        if ($region =~ /^$regex_minus$/) {
+          print "[FIXED PRIMER] Sequence RC trouvee a la position fournie $hint_position (brin -).\n";
+          print "[FIXED PRIMER] RC sequence found at supplied position $hint_position (- strand).\n";
+          return ($hint_position, "minus");
+        }
+      }
+    }
+    print "[FIXED PRIMER] AVERTISSEMENT: Sequence non trouvee a la position fournie $hint_position. Lancement du scan complet...\n";
+    print "[FIXED PRIMER] WARNING: Sequence not found at supplied position $hint_position. Starting full scan...\n";
+  }
+
+  # --- Etape 2 : scan complet de toutes les sequences ---
+  # --- Step 2: full scan of all sequences ---
+  foreach my $seq ($alignment->each_seq()) {
+    my ($found_pos, $found_strand) = $scan_seq->($seq->seq());
+    if (defined $found_pos) {
+      print "[FIXED PRIMER] Sequence trouvee par scan complet a la position $found_pos (brin $found_strand).\n";
+      print "[FIXED PRIMER] Sequence found by full scan at position $found_pos (strand $found_strand).\n";
+      return ($found_pos, $found_strand);
+    }
+  }
+
+  print "[FIXED PRIMER] ERREUR: Sequence '$primer_seq' introuvable dans l'alignement.\n";
+  print "[FIXED PRIMER] ERROR: Sequence '$primer_seq' not found in the alignment.\n";
+  return (undef, undef);
+}
+
+#-------------------------------------------------------------------------------
+
+=head2 injectFixedPrimers
+
+  Injecte des amorces fixees par l utilisateur dans le pipeline LAVA.
+  Injects user-fixed primers into the LAVA pipeline.
+
+  Chaque amorce fixee :
+    1. Passe par checkPrimerMismatchTolerance (Branch and Bound IUPAC) pour tenter
+       d ameliorer son rendement en couverture.
+    2. Est TOUJOURS incluse dans le pool retourne, meme si la couverture est sous le seuil
+       (tag coverage_forced = 1).
+
+  Each fixed primer:
+    1. Goes through checkPrimerMismatchTolerance (Branch and Bound IUPAC) to try
+       to improve its coverage yield.
+    2. Is ALWAYS included in the returned pool, even if coverage is below threshold
+       (tag coverage_forced = 1).
+
+  Arguments:
+    $alignment          - MSA BioPerl (Bio::SimpleAlign)
+    $fixed_specs_ref    - Arrayref de hashrefs { type, seq, pos }
+                          Arrayref of hashrefs { type, seq, pos }
+    $min_match_percent, $min_iupac_percent, $min_primer_coverage
+    $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen
+    $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency
+
+  Returns:
+    Une hashref { "F2" => [$oligo1, ...], "B3" => [...], ... }
+    A hashref    { "F2" => [$oligo1, ...], "B3" => [...], ... }
+
+=cut
+
+sub injectFixedPrimers {
+  my ($alignment, $fixed_specs_ref,
+      $min_match_percent, $min_iupac_percent, $min_primer_coverage,
+      $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen,
+      $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency,
+      $fixed_primer_optimize) = @_;
+      
+  $fixed_primer_optimize //= 1; # Par defaut, on optimise
+
+  my %result;  # { "F2" => [@oligos], ... }
+
+  return \%result unless defined $fixed_specs_ref && @{$fixed_specs_ref};
+
+  # LAVA 2026: Fonction de calcul Tm robuste via oligotm
+  my $calc_tm = sub {
+      my ($seq, $type) = @_;
+      my %IUPAC = (
+          'A' => ['A'], 'C' => ['C'], 'G' => ['G'], 'T' => ['T'], 'U' => ['T'],
+          'M' => ['A','C'], 'R' => ['A','G'], 'W' => ['A','T'],
+          'S' => ['C','G'], 'Y' => ['C','T'], 'K' => ['G','T'],
+          'V' => ['A','C','G'], 'H' => ['A','C','T'], 'D' => ['A','G','T'], 'B' => ['C','G','T'],
+          'N' => ['A','C','G','T']
+      );
+      my @seqs = ('');
+      for my $char (split //, uc($seq)) {
+          my $bases = $IUPAC{$char} || [$char];
+          my @new_seqs;
+          for my $s (@seqs) {
+              for my $b (@$bases) { push @new_seqs, $s . $b; }
+          }
+          @seqs = @new_seqs;
+      }
+      my $sum = 0; my $count = 0;
+      my $cmd = "oligotm -mv 50 -dv 8 -n 1.4 -d 400 -tp 1 -sc 1";
+      for my $s (@seqs) {
+          my $tm = `$cmd $s 2>/dev/null`;
+          chomp($tm);
+          if ($tm =~ /^([\d\.]+)$/) { $sum += $1; $count++; }
+      }
+      if ($count > 0) { return $sum / $count; }
+      print "[FIXED PRIMER] WARNING: oligotm echoue ou introuvable. Utilisation d'un Tm par defaut.\n";
+      return ($type =~ /^F1C|B1C$/i) ? 62.0 : 60.0;
+  };
+
+  # Extraire les sequences de l alignement pour la validation
+  # Extract alignment sequences for validation
+  my @sequences = ();
+  foreach my $seq ($alignment->each_seq()) {
+    my $s = uc($seq->seq());
+    $s =~ s/[^ATCG]/N/g;
+    push @sequences, $s;
+  }
+
+  foreach my $spec (@{$fixed_specs_ref}) {
+    my $primer_type  = uc($spec->{type}  // "UNKNOWN");
+    my $primer_seq   = uc($spec->{seq}   // "");
+    my $hint_pos     = $spec->{pos};  # peut etre undef / can be undef
+
+    if (!$primer_seq) {
+      print "[FIXED PRIMER] ERREUR: Sequence vide pour le type $primer_type. Ignore.\n";
+      print "[FIXED PRIMER] ERROR: Empty sequence for type $primer_type. Skipped.\n";
+      next;
+    }
+
+    print "\n[FIXED PRIMER] Traitement de l'amorce fixee : TYPE=$primer_type SEQ=$primer_seq\n";
+    print "[FIXED PRIMER] Processing fixed primer: TYPE=$primer_type SEQ=$primer_seq\n";
+
+    # --- Etape 1 : localisation dans l alignement ---
+    # --- Step 1: locate in the alignment ---
+    my ($position, $strand) = findPrimerPositionInAlignment($alignment, $primer_seq, $hint_pos);
+
+    if (!defined $position) {
+      print "[FIXED PRIMER] AVERTISSEMENT: Impossible de localiser '$primer_seq'. Injection a la position 0 par defaut.\n";
+      print "[FIXED PRIMER] WARNING: Cannot locate '$primer_seq'. Injecting at position 0 by default.\n";
+      $position = 0;
+      $strand   = "plus";
+    }
+
+    # --- Etape 2 : Branch and Bound IUPAC (meme circuit que les amorces normales) ---
+    # --- Step 2: Branch and Bound IUPAC (same circuit as normal primers) ---
+    print "[FIXED PRIMER] Validation de l'amorce et calcul de couverture...\n";
+    print "[FIXED PRIMER] Validating primer and calculating coverage...\n";
+
+    my ($final_sequence, $coverage_percent, $is_degenerate, $compatible_seq_ids) =
+      checkPrimerMismatchTolerance(
+        \@sequences, $position, length($primer_seq), $primer_seq,
+        $min_match_percent, $min_iupac_percent, $min_primer_coverage,
+        $maxTotalDegen, $maxConsecDegen,
+        $max3PrimeDegen, $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency
+      );
+
+    # Si B&B n a pas ameliore (retour de chaine vide), conserver la sequence originale
+    # If B&B did not improve (empty string returned), keep the original sequence
+    $final_sequence   = $primer_seq     if !defined $final_sequence || $final_sequence eq "";
+    $compatible_seq_ids //= [];
+    $coverage_percent //= 0.0;
+
+    # Chantier 2: Application de l'option fixed_primer_optimize
+    if (!$fixed_primer_optimize) {
+        $final_sequence = $primer_seq;
+        print "[FIXED PRIMER] Mode sans optimisation : sequence conservee telle quelle, couverture mesuree = $coverage_percent% (".scalar(@$compatible_seq_ids)." sequences).\n";
+    } else {
+        print "[FIXED PRIMER] Mode optimisation (Branch and Bound IUPAC) : sequence $final_sequence, couverture mesuree = $coverage_percent% (".scalar(@$compatible_seq_ids)." sequences).\n";
+    }
+
+    my $coverage_forced = ($coverage_percent < $min_primer_coverage) ? 1 : 0;
+
+    if ($coverage_forced) {
+      printf("[FIXED PRIMER] Couverture apres B&B : %.1f%% < seuil %.1f%% -> INCLUSION FORCEE (amorce fixee).\n",
+             $coverage_percent, $min_primer_coverage);
+      printf("[FIXED PRIMER] Coverage after B&B: %.1f%% < threshold %.1f%% -> FORCED INCLUSION (fixed primer).\n",
+             $coverage_percent, $min_primer_coverage);
+    } else {
+      printf("[FIXED PRIMER] Couverture apres B&B : %.1f%% >= seuil %.1f%% -> ACCEPTEE normalement.\n",
+             $coverage_percent, $min_primer_coverage);
+      printf("[FIXED PRIMER] Coverage after B&B: %.1f%% >= threshold %.1f%% -> ACCEPTED normally.\n",
+             $coverage_percent, $min_primer_coverage);
+    }
+
+    # --- Etape 3 : creation de l objet Oligo compatible avec le reste du pipeline ---
+    # --- Step 3: create an Oligo object compatible with the rest of the pipeline ---
+    # Conformite stricte LAVA (2026) :
+    # Si le brin est minus, la convention du moteur LAVA attend l'extremite DROITE 
+    # de l'amorce sur l'alignement de reference (voir buildNativeReversePool l.588)
+    my $final_location = ($strand eq "minus") ? ($position + length($primer_seq) - 1) : $position;
+    
+    my $fixed_oligo = LLNL::LAVA::Oligo->new({
+      "sequence" => $final_sequence,
+      "location" => $final_location,
+      "strand"   => $strand,
+    });
+
+    # Tags obligatoires pour la compatibilite avec le pipeline
+    # Mandatory tags for pipeline compatibility
+    $fixed_oligo->setTag("is_degenerate",         $is_degenerate ? 1 : 0);
+    $fixed_oligo->setTag("iupac_coverage",         sprintf("%.1f", $coverage_percent));
+    $fixed_oligo->setTag("compatible_sequence_ids", $compatible_seq_ids);
+    $fixed_oligo->setTag("original_sequence",      $primer_seq);
+
+    # Tags specific to fixed primers
+    $fixed_oligo->setTag("is_fixed",               1);
+    $fixed_oligo->setTag("fixed_type",             $primer_type);
+    $fixed_oligo->setTag("coverage_forced",        $coverage_forced);
+    $fixed_oligo->setTag("fixed_original_seq",     $primer_seq);
+    
+    # LAVA 2026: Eviter les crashs dans analyzeAll, mais avec VRAI Tm
+    $fixed_oligo->setTag("primer3_penalty",        0);
+    my $real_tm = $calc_tm->($final_sequence, $primer_type);
+    $fixed_oligo->setTag("primer3_tm",             $real_tm);
+
+    printf("[FIXED PRIMER] Amorce injectee : TYPE=%s POS=%d STRAND=%s SEQ=%s COUV=%.1f%% FORCE=%d\n",
+           $primer_type, $final_location, $strand, $final_sequence, $coverage_percent, $coverage_forced);
+    printf("[FIXED PRIMER] Primer injected : TYPE=%s POS=%d STRAND=%s SEQ=%s COVER=%.1f%% FORCED=%d\n",
+           $primer_type, $final_location, $strand, $final_sequence, $coverage_percent, $coverage_forced);
+
+    $result{$primer_type} //= [];
+    push @{$result{$primer_type}}, $fixed_oligo;
+  }
+
+  return \%result;
+}
+
+#-------------------------------------------------------------------------------
+
+=head2 computeFixedPrimerWindows
+
+  Calcule la fenetre genomique valide pour chaque type d amorce LAMP en fonction
+  des amorces fixees par l utilisateur.
+  Computes the valid genomic window for each LAMP primer type based on user-fixed primers.
+
+  Principe / Principle:
+    Toute amorce fixee contraint geometriquement la position de toutes les autres.
+    Approche conservative : fenetre = [P - sig_max - margin, P + sig_max + margin]
+    intersection de toutes les contraintes des amorces fixees.
+    Les candidats hors-fenetre sont geometriquement impossibles meme avec la sigmoide.
+    Any fixed primer geometrically constrains all other primers.
+    Conservative approach: window = [P - sig_max - margin, P + sig_max + margin]
+    intersection of all fixed primer constraints.
+    Out-of-window candidates are geometrically impossible even with sigmoid penalty.
+
+  Arguments:
+    fixed_specs_ref - Arrayref de specs resolues { type, seq, pos (resolu) }
+    sig_max         - Longueur maximale de la signature (ex: 400 nt)
+    margin          - Marge de securite en nt (defaut: 200)
+    aln_length      - Longueur totale de l alignement
+
+  Returns:
+    Hashref { type => [min_pos, max_pos] } ou {} si aucune contrainte applicable.
+
+=cut
+
+sub computeFixedPrimerWindows {
+  my ($fixed_specs_ref, $sig_max, $margin, $aln_length) = @_;
+
+  $margin //= 200;
+  my %windows;
+
+  return {} unless defined $fixed_specs_ref && @{$fixed_specs_ref};
+
+  # Tous les types d amorces LAMP traites par les scripts / All LAMP primer types handled
+  my @all_types = qw(F3 F2 F1C B1C B2 B3 FLOOP BLOOP FSTEM BSTEM);
+
+  # Fenetre globale initiale = toute la longueur / Initial global window = full length
+  my $global_min = 0;
+  my $global_max = defined $aln_length ? $aln_length : 999_999;
+
+  my $window_width = $sig_max + $margin;
+  my $has_resolved = 0;
+
+  foreach my $spec (@{$fixed_specs_ref}) {
+    my $pos = $spec->{pos};
+    next unless defined $pos;  # position non resolue = pas de contrainte / unresolved = no constraint
+    $has_resolved = 1;
+
+    # Fenetre de la contrainte de cette amorce fixee
+    # Constraint window for this fixed primer
+    my $cmin = $pos - $window_width;
+    my $cmax = $pos + $window_width;
+    $cmin = 0              if $cmin < 0;
+    $cmax = $aln_length    if defined $aln_length && $cmax > $aln_length;
+
+    # Intersection avec la fenetre globale courante / Intersect with current global window
+    $global_min = $cmin if $cmin > $global_min;
+    $global_max = $cmax if $cmax < $global_max;
+
+    printf("[FIXED PRIMER WINDOW] Amorce %s@%d -> fenetre contrainte [%d, %d] (sig_max=%d + marge=%d)\n",
+           $spec->{type}, $pos, $cmin, $cmax, $sig_max, $margin);
+    printf("[FIXED PRIMER WINDOW] Primer %s@%d -> constraint window [%d, %d] (sig_max=%d + margin=%d)\n",
+           $spec->{type}, $pos, $cmin, $cmax, $sig_max, $margin);
+  }
+
+  return {} unless $has_resolved;
+
+  if ($global_min >= $global_max) {
+    print "[FIXED PRIMER WINDOW] AVERTISSEMENT: Fenetre globale invalide [$global_min, $global_max]. Contraintes incompatibles. Filtrage desactive.\n";
+    print "[FIXED PRIMER WINDOW] WARNING: Invalid global window [$global_min, $global_max]. Incompatible constraints. Filtering disabled.\n";
+    return {};
+  }
+
+  my $pct = (defined $aln_length && $aln_length > 0)
+              ? sprintf("%.1f%%", 100.0 * ($global_max - $global_min) / $aln_length)
+              : "N/A";
+  printf("[FIXED PRIMER WINDOW] Fenetre globale retenue : [%d, %d] (%s de l alignement)\n",
+         $global_min, $global_max, $pct);
+  printf("[FIXED PRIMER WINDOW] Global window retained  : [%d, %d] (%s of alignment)\n",
+         $global_min, $global_max, $pct);
+
+  # Appliquer la fenetre globale a tous les types / Apply global window to all types
+  foreach my $type (@all_types) {
+    $windows{$type} = [$global_min, $global_max];
+  }
+
+  return \%windows;
+}
+
 1;
 
 __END__
@@ -1945,4 +2422,3 @@ LAVA-DNA Fork (2026) - Code audit Phase 34-36
 L<LLNL::LAVA::Core>, L<LLNL::LAVA::Validator>
 
 =cut
-
