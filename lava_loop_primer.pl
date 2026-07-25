@@ -91,7 +91,7 @@ use LLNL::LAVA::PrimerSetInfo::PCRPair;
 use LLNL::LAVA::PrimerSet::LAMP;
 use LLNL::LAVA::Core qw(generateDistancePenalties calculate_proportional_geometry generateSigmoidPenalty countDegenerateBases);
 use LLNL::LAVA::Validator qw(checkPrimerMismatchTolerance getPrimerTargetedSequences isIUPACCompatible rev_comp generateIUPACCode validateCompleteSignatureSpacing);
-use LLNL::LAVA::PipelineUtils qw(getOligosWithMismatchTolerance set_pipeline_threads buildNativeReversePool analyzeAll enumeratePairs buildMetricsArray reducePairInfosByPenalty reducePrimersByOverlap reduceSignaturesByOverlap flattenInfoData buildBigMerge calculateSignatureIntersection createPerSignatureFiles createAmplificationFiles analyzeSignatureCombinations generateCombinations calculateDynamicPairLengths); # buildReversePrimers retiré (DEPRECATED, remplacé par buildNativeReversePool)
+use LLNL::LAVA::PipelineUtils qw(getOligosWithMismatchTolerance set_pipeline_threads buildNativeReversePool analyzeAll enumeratePairs buildMetricsArray reducePairInfosByPenalty reducePrimersByOverlap reduceSignaturesByOverlap flattenInfoData buildBigMerge calculateSignatureIntersection createPerSignatureFiles createAmplificationFiles analyzeSignatureCombinations generateCombinations calculateDynamicPairLengths injectFixedPrimers findPrimerPositionInAlignment computeFixedPrimerWindows); # buildReversePrimers retire (DEPRECATED, remplace par buildNativeReversePool)
 use LLNL::LAVA::ForkManager;
 
 # Activer l'auto-flush de STDOUT pour les logs temps réel via Flask / Enable STDOUT auto-flush for real-time logs via Flask
@@ -213,11 +213,15 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       #"inner_pair_target_length=i" => \$options{"inner_pair_target_length"}, 
 
       "option_file|options_file=s" => \$options{"option_file"},
+      # --- AMORCES FIXEES (peut etre repete plusieurs fois) ---
+      # --- FIXED PRIMERS (can be repeated multiple times) ---
+      "fixed_primer=s" => \@{$options{"fixed_primer"}},
     );
 
   my %optionDefaults =
     (
       "threads" => "auto",
+      "fixed_primer" => [],  # Tableau d'amorces fixees / Array of fixed primers
       "signature_max_length" => 320,
       "outer_primer_target_length" => 20,
       "outer_primer_min_length" => 18,
@@ -445,6 +449,43 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
   print "Config: Min Base Frequency = $minBaseFrequency\n";
   my $entropyThreshold = optionWithDefault($options_r, "entropy_threshold", 1.5);
   my $maxTmDiff = optionWithDefault($options_r, "max_tm_diff", 5.0);
+
+  # --- Parsing des amorces fixees / Parsing of fixed primers ---
+  # Format accepte : TYPE:SEQUENCE  ou  TYPE:SEQUENCE:POSITION
+  # Accepted format: TYPE:SEQUENCE  or  TYPE:SEQUENCE:POSITION
+  # Types valides LOOP : F3 B3 F2 B2 F1C B1C FLOOP BLOOP
+  # Valid types LOOP:   F3 B3 F2 B2 F1C B1C FLOOP BLOOP
+  my @fixedPrimerSpecs = ();
+  my $fixedPrimerWindows_r = {};  # Fenetre geometrique calculee / Computed geometric window
+  my @raw_fixed = @{ $options{"fixed_primer"} // [] };
+  for my $raw (@raw_fixed) {
+    my @parts = split(/:/, $raw, 3);
+    if (@parts < 2 || !$parts[0] || !$parts[1]) {
+      print "[FIXED PRIMER] AVERTISSEMENT: Format invalide '$raw'. Attendu TYPE:SEQUENCE ou TYPE:SEQUENCE:POSITION. Ignore.\n";
+      print "[FIXED PRIMER] WARNING: Invalid format '$raw'. Expected TYPE:SEQUENCE or TYPE:SEQUENCE:POSITION. Skipped.\n";
+      next;
+    }
+    my $spec = {
+      type => uc($parts[0]),
+      seq  => uc($parts[1]),
+      pos  => (defined $parts[2] && $parts[2] =~ /^\d+$/) ? int($parts[2]) : undef,
+    };
+    # Validation du type pour LOOP
+    my %valid_loop_types = map { $_ => 1 } qw(F3 B3 F2 B2 F1C B1C FLOOP BLOOP);
+    if (!$valid_loop_types{$spec->{type}}) {
+      print "[FIXED PRIMER] AVERTISSEMENT: Type '$spec->{type}' non reconnu pour LOOP. Types valides: F3 B3 F2 B2 F1C B1C FLOOP BLOOP.\n";
+      print "[FIXED PRIMER] WARNING: Type '$spec->{type}' not recognized for LOOP. Valid types: F3 B3 F2 B2 F1C B1C FLOOP BLOOP.\n";
+    }
+    push @fixedPrimerSpecs, $spec;
+    printf("[FIXED PRIMER] Spec enregistree: TYPE=%s SEQ=%s POS=%s\n",
+           $spec->{type}, $spec->{seq}, defined $spec->{pos} ? $spec->{pos} : "auto");
+  }
+  my %isFixedType = ();
+  for my $spec (@fixedPrimerSpecs) {
+    $isFixedType{$spec->{type}} = 1;
+  }
+
+
 
   my $outerPrimerTargetLength =
     optionWithDefault($options_r, "outer_primer_target_length", 
@@ -778,7 +819,49 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
   }
 
   my $sequenceLength = $inputMSA->length;
-  
+
+  # --- Resolution anticipee des positions des amorces fixees ---
+  # --- Early position resolution for fixed primers ---
+  # On resout les positions maintenant (avant Primer3) pour pouvoir calculer
+  # la fenetre geometrique et filtrer les candidats AVANT leur generation.
+  # We resolve positions now (before Primer3) to compute the geometric window
+  # and filter candidates BEFORE their generation.
+  if (@fixedPrimerSpecs) {
+    print "\n[FIXED PRIMER WINDOW] Resolution anticipee des positions / Early position resolution...\n";
+    for my $spec (@fixedPrimerSpecs) {
+      next if defined $spec->{pos};  # position deja fournie / already provided
+      my ($found_pos, $found_strand) = findPrimerPositionInAlignment($inputMSA, $spec->{seq}, undef);
+      if (defined $found_pos) {
+        $spec->{pos}    = $found_pos;
+        $spec->{strand} = $found_strand;
+        printf("[FIXED PRIMER WINDOW] %s '%s' -> position resolue : %d (brin %s)\n",
+               $spec->{type}, $spec->{seq}, $found_pos, $found_strand);
+      } else {
+        print "[FIXED PRIMER WINDOW] AVERTISSEMENT: position introuvable pour $spec->{type} '$spec->{seq}'. Fenetre non contrainte pour cette amorce.\n";
+        print "[FIXED PRIMER WINDOW] WARNING: position not found for $spec->{type} '$spec->{seq}'. No window constraint for this primer.\n";
+      }
+    }
+
+    my $fixed_window_margin = optionWithDefault($options_r, "fixed_primer_margin", 200);
+    my $current_sig_max = optionWithDefault($options_r, "signature_max_length", 320);
+    $fixedPrimerWindows_r = computeFixedPrimerWindows(
+      \@fixedPrimerSpecs, $current_sig_max, $fixed_window_margin, $sequenceLength
+    );
+  }
+
+
+  my $global_included_region = undef;
+  if (%{$fixedPrimerWindows_r}) {
+    my $win = $fixedPrimerWindows_r->{"F3"};
+    if (defined $win) {
+      my $len = $win->[1] - $win->[0] + 1;
+      if ($len > 0) {
+        $global_included_region = $win->[0] . "," . $len;
+        print "[FIXED PRIMER WINDOW] Passing SEQUENCE_INCLUDED_REGION=$global_included_region to Primer3\n";
+      }
+    }
+  }
+
   # Extraire les objets de séquence pour la génération des fichiers FASTA / Extract sequence objects for FASTA file generation
   my @sequence_objects = ();
   my @sequence_names = ();
@@ -812,16 +895,20 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       "salt_monovalent" => $saltMonovalent,
       "salt_divalent" => $saltDivalent,
       "entropy_threshold" => $entropyThreshold,
+      (defined $global_included_region ? ("included_region" => $global_included_region) : ()),
     });
 
   print "Enumerating outer forward primers\n";
-  my @outerForwardPrimers = getOligosWithMismatchTolerance($outerEnumerator, $inputMSA,
+  my @outerForwardPrimers = ();
+  if ($isFixedType{"F3"}) {
+    print "Skipping outer forward (F3) enumeration because it is fixed.\n";
+  } else {
+    @outerForwardPrimers = getOligosWithMismatchTolerance($outerEnumerator, $inputMSA,
                                                           $primerMinMatchPercent, $primerIupacMinPercent, $minPrimerCoverage,
                                                           $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen, $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency, "Outer Forward (F3)");
 
-  print "  Generated \"" .
-    scalar(@outerForwardPrimers) .
-    "\" outer forward primers\n";
+    print "  Generated \"" . scalar(@outerForwardPrimers) . "\" outer forward primers\n";
+  }
   
   # DEBUG : Vérifier que les primers ont le tag compatible_sequence_ids / Verify that primers have the compatible_sequence_ids tag
   my $outer_with_tag = 0;
@@ -838,13 +925,18 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
   # Option B: NATIVE Outer Reverse generation via Primer3 on RC(MSA)
   # Reverse primers generated independently from Forward — 3' protection guaranteed
   print "Enumerating outer NATIVE reverse primers (Option B)\n";
-  my @outerReversePrimers = buildNativeReversePool(
-    $outerEnumerator, $inputMSA,
-    $primerMinMatchPercent, $primerIupacMinPercent, $minPrimerCoverage,
-    $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen, $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency,
-    \&checkPrimerMismatchTolerance, \&isIUPACCompatible, \&rev_comp, "Outer Reverse (B3)"
-  );
-  print "  Generated \"" . scalar(@outerReversePrimers) . "\" outer native reverse primers\n";
+  my @outerReversePrimers = ();
+  if ($isFixedType{"B3"}) {
+    print "Skipping outer reverse (B3) enumeration because it is fixed.\n";
+  } else {
+    @outerReversePrimers = buildNativeReversePool(
+      $outerEnumerator, $inputMSA,
+      $primerMinMatchPercent, $primerIupacMinPercent, $minPrimerCoverage,
+      $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen, $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency,
+      \&checkPrimerMismatchTolerance, \&isIUPACCompatible, \&rev_comp, "Outer Reverse (B3)"
+    );
+    print "  Generated \"" . scalar(@outerReversePrimers) . "\" outer native reverse primers\n";
+  }
 
 
   # Enumerate loop primers, since the loop primers extend in the opposite 
@@ -870,6 +962,7 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       "salt_monovalent" => $saltMonovalent,
       "salt_divalent" => $saltDivalent,
       "entropy_threshold" => $entropyThreshold,
+      (defined $global_included_region ? ("included_region" => $global_included_region) : ()),
     });
 
   # This difference in naming is intentional for now (loopBackPrimers instead of 
@@ -884,25 +977,31 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
   # BLOOP : genere nativement sur le brin + (Back Loop = sens du brin +, 3' pointe vers B1c)
   # BLOOP: natively generated on plus strand (Back Loop = sense of plus strand, 3' points toward B1c)
   print "Enumerating loop BACK (BLOOP) primers on plus strand\n";
+  if ($isFixedType{"BLOOP"}) {
+    print "Skipping loop BACK (BLOOP) enumeration because it is fixed.\n";
+  } else {
     @loopBackPrimers = getOligosWithMismatchTolerance($loopEnumerator, $inputMSA,
                                                         $primerMinMatchPercent, $primerIupacMinPercent, $minPrimerCoverage,
                                                         $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen, $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency, "Loop Back (BLOOP)");
 
-  print "  Generated \"" .
-    scalar(@loopBackPrimers) .
-    "\" loop BACK (BLOOP) primers\n";
+    print "  Generated \"" . scalar(@loopBackPrimers) . "\" loop BACK (BLOOP) primers\n";
+  }
 
   # FLOOP : Option B - genere nativement sur RC(MSA) pour garantir la protection 3'
   # FLOOP: Option B - natively generated on RC(MSA) to guarantee 3-prime protection
   # (Forward Loop = antisens, 3' pointe vers F1c - correspondait avant au 5' du BLOOP source = bug)
   print "Enumerating loop FORWARD (FLOOP) NATIVE reverse primers (Option B)\n";
+  if ($isFixedType{"FLOOP"}) {
+    print "Skipping loop FORWARD (FLOOP) enumeration because it is fixed.\n";
+  } else {
     @loopForwardPrimers = buildNativeReversePool(
       $loopEnumerator, $inputMSA,
       $primerMinMatchPercent, $primerIupacMinPercent, $minPrimerCoverage,
       $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen, $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency,
       \&checkPrimerMismatchTolerance, \&isIUPACCompatible, \&rev_comp, "Loop Forward (FLOOP)"
     );
-  print "  Generated \"" . scalar(@loopForwardPrimers) . "\" loop FORWARD (FLOOP) native primers\n";
+    print "  Generated \"" . scalar(@loopForwardPrimers) . "\" loop FORWARD (FLOOP) native primers\n";
+  }
   } else {
     print "Loop primers désactivés - génération ignorée\n";
   }
@@ -927,26 +1026,35 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       "salt_monovalent" => $saltMonovalent,
       "salt_divalent" => $saltDivalent,
       "entropy_threshold" => $entropyThreshold,
+      (defined $global_included_region ? ("included_region" => $global_included_region) : ()),
     });
 
   print "Enumerating middle forward primers\n";
-  my @middleForwardPrimers = getOligosWithMismatchTolerance($middleEnumerator, $inputMSA,
+  my @middleForwardPrimers = ();
+  if ($isFixedType{"F2"}) {
+    print "Skipping middle forward (F2) enumeration because it is fixed.\n";
+  } else {
+    @middleForwardPrimers = getOligosWithMismatchTolerance($middleEnumerator, $inputMSA,
                                                            $primerMinMatchPercent, $primerIupacMinPercent, $minPrimerCoverage,
                                                            $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen, $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency, "Middle Forward (F2)");
 
-  print "  Generated \"" .
-    scalar(@middleForwardPrimers) .
-    "\" middle primers\n";
+    print "  Generated \"" . scalar(@middleForwardPrimers) . "\" middle primers\n";
+  }
 
   # Option B : Generation NATIVE des Reverse Middle via Primer3 sur RC(MSA)
   print "Enumerating middle NATIVE reverse primers (Option B)\n";
-  my @middleReversePrimers = buildNativeReversePool(
-    $middleEnumerator, $inputMSA,
-    $primerMinMatchPercent, $primerIupacMinPercent, $minPrimerCoverage,
-    $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen, $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency,
-    \&checkPrimerMismatchTolerance, \&isIUPACCompatible, \&rev_comp, "Middle Reverse (B2)"
-  );
-  print "  Generated \"" . scalar(@middleReversePrimers) . "\" middle native reverse primers\n";
+  my @middleReversePrimers = ();
+  if ($isFixedType{"B2"}) {
+    print "Skipping middle reverse (B2) enumeration because it is fixed.\n";
+  } else {
+    @middleReversePrimers = buildNativeReversePool(
+      $middleEnumerator, $inputMSA,
+      $primerMinMatchPercent, $primerIupacMinPercent, $minPrimerCoverage,
+      $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen, $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency,
+      \&checkPrimerMismatchTolerance, \&isIUPACCompatible, \&rev_comp, "Middle Reverse (B2)"
+    );
+    print "  Generated \"" . scalar(@middleReversePrimers) . "\" middle native reverse primers\n";
+  }
 
   # Enumerate inner primers 
   my $innerEnumerator = LLNL::LAVA::OligoEnumerator::Primer3Conserved->new(
@@ -968,16 +1076,20 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       "salt_monovalent" => $saltMonovalent,
       "salt_divalent" => $saltDivalent,
       "entropy_threshold" => $entropyThreshold,
+      (defined $global_included_region ? ("included_region" => $global_included_region) : ()),
     });
 
   print "Enumerating inner forward primers\n";
-  my @innerForwardPrimers = getOligosWithMismatchTolerance($innerEnumerator, $inputMSA,
+  my @innerForwardPrimers = ();
+  if ($isFixedType{"F1C"}) {
+    print "Skipping inner forward (F1C) enumeration because it is fixed.\n";
+  } else {
+    @innerForwardPrimers = getOligosWithMismatchTolerance($innerEnumerator, $inputMSA,
                                                           $primerMinMatchPercent, $primerIupacMinPercent, $minPrimerCoverage,
                                                           $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen, $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency, "Inner Forward (F1c)");
 
-  print "  Generated \"" .
-    scalar(@innerForwardPrimers) .
-    "\" inner primers\n";
+    print "  Generated \"" . scalar(@innerForwardPrimers) . "\" inner primers\n";
+  }
   
   # DEBUG : Vérifier que les primers inner ont le tag / Verify that inner primers have the tag
   my $inner_with_tag = 0;
@@ -990,13 +1102,18 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
 
   # Option B : Generation NATIVE des Reverse Inner via Primer3 sur RC(MSA)
   print "Enumerating inner NATIVE reverse primers (Option B)\n";
-  my @innerReversePrimers = buildNativeReversePool(
-    $innerEnumerator, $inputMSA,
-    $primerMinMatchPercent, $primerIupacMinPercent, $minPrimerCoverage,
-    $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen, $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency,
-    \&checkPrimerMismatchTolerance, \&isIUPACCompatible, \&rev_comp, "Inner Reverse (B1c)"
-  );
-  print "  Generated \"" . scalar(@innerReversePrimers) . "\" inner native reverse primers\n";
+  my @innerReversePrimers = ();
+  if ($isFixedType{"B1C"}) {
+    print "Skipping inner reverse (B1C) enumeration because it is fixed.\n";
+  } else {
+    @innerReversePrimers = buildNativeReversePool(
+      $innerEnumerator, $inputMSA,
+      $primerMinMatchPercent, $primerIupacMinPercent, $minPrimerCoverage,
+      $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen, $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency,
+      \&checkPrimerMismatchTolerance, \&isIUPACCompatible, \&rev_comp, "Inner Reverse (B1c)"
+    );
+    print "  Generated \"" . scalar(@innerReversePrimers) . "\" inner native reverse primers\n";
+  }
 
   # TODO: want to flip any primer locations to reflect the standard
   # positive strand 5' location notation if they were generated
@@ -1010,6 +1127,74 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
   my $middlePrimerAnalyzer = $outerPrimerAnalyzer;
   my $innerPrimerAnalyzer = $outerPrimerAnalyzer;
   my $loopPrimerAnalyzer = $outerPrimerAnalyzer;
+  # --- FILTRAGE GEOMETRIQUE PAR FENETRE (si amorces fixees) ---
+  # --- GEOMETRIC WINDOW FILTERING (if fixed primers are defined) ---
+  # Elimination des candidats geometriquement impossibles AVANT l'injection.
+  # Eliminating geometrically impossible candidates BEFORE injection.
+  # Note: la penalite sigmoide reste inchangee pour les candidats dans la marge.
+  # Note: sigmoid penalty remains unchanged for candidates within the margin.
+  if (%{$fixedPrimerWindows_r}) {
+    my $win_F3    = $fixedPrimerWindows_r->{"F3"}    // [0, 999_999];
+    my $win_B3    = $fixedPrimerWindows_r->{"B3"}    // [0, 999_999];
+    my $win_F2    = $fixedPrimerWindows_r->{"F2"}    // [0, 999_999];
+    my $win_B2    = $fixedPrimerWindows_r->{"B2"}    // [0, 999_999];
+    my $win_F1C   = $fixedPrimerWindows_r->{"F1C"}   // [0, 999_999];
+    my $win_B1C   = $fixedPrimerWindows_r->{"B1C"}   // [0, 999_999];
+    my $win_FLOOP = $fixedPrimerWindows_r->{"FLOOP"} // [0, 999_999];
+    my $win_BLOOP = $fixedPrimerWindows_r->{"BLOOP"} // [0, 999_999];
+
+    my $before_fwd_outer  = scalar(@outerForwardPrimers);
+    my $before_rev_outer  = scalar(@outerReversePrimers);
+    my $before_fwd_middle = scalar(@middleForwardPrimers);
+    my $before_rev_middle = scalar(@middleReversePrimers);
+    my $before_fwd_inner  = scalar(@innerForwardPrimers);
+    my $before_rev_inner  = scalar(@innerReversePrimers);
+    my $before_floop      = scalar(@loopForwardPrimers);
+    my $before_bloop      = scalar(@loopBackPrimers);
+
+    @outerForwardPrimers  = grep { $_->location() >= $win_F3->[0]    && $_->location() <= $win_F3->[1]    } @outerForwardPrimers;
+    @outerReversePrimers  = grep { $_->location() >= $win_B3->[0]    && $_->location() <= $win_B3->[1]    } @outerReversePrimers;
+    @middleForwardPrimers = grep { $_->location() >= $win_F2->[0]    && $_->location() <= $win_F2->[1]    } @middleForwardPrimers;
+    @middleReversePrimers = grep { $_->location() >= $win_B2->[0]    && $_->location() <= $win_B2->[1]    } @middleReversePrimers;
+    @innerForwardPrimers  = grep { $_->location() >= $win_F1C->[0]   && $_->location() <= $win_F1C->[1]   } @innerForwardPrimers;
+    @innerReversePrimers  = grep { $_->location() >= $win_B1C->[0]   && $_->location() <= $win_B1C->[1]   } @innerReversePrimers;
+    @loopForwardPrimers   = grep { $_->location() >= $win_FLOOP->[0] && $_->location() <= $win_FLOOP->[1] } @loopForwardPrimers;
+    @loopBackPrimers      = grep { $_->location() >= $win_BLOOP->[0] && $_->location() <= $win_BLOOP->[1] } @loopBackPrimers;
+
+    printf("[FIXED PRIMER WINDOW] Filtrage LOOP terminé / LOOP filtering done:\n");
+    printf("  F3:    %d -> %d | B3:    %d -> %d\n", $before_fwd_outer,  scalar(@outerForwardPrimers),
+                                                     $before_rev_outer,  scalar(@outerReversePrimers));
+    printf("  F2:    %d -> %d | B2:    %d -> %d\n", $before_fwd_middle, scalar(@middleForwardPrimers),
+                                                     $before_rev_middle, scalar(@middleReversePrimers));
+    printf("  F1c:   %d -> %d | B1c:   %d -> %d\n", $before_fwd_inner,  scalar(@innerForwardPrimers),
+                                                     $before_rev_inner,  scalar(@innerReversePrimers));
+    printf("  FLOOP: %d -> %d | BLOOP: %d -> %d\n", $before_floop, scalar(@loopForwardPrimers),
+                                                     $before_bloop, scalar(@loopBackPrimers));
+  }
+
+  # --- INJECTION DES AMORCES FIXEES dans les pools correspondants ---
+
+  # --- INJECT FIXED PRIMERS into the corresponding pools ---
+  if (@fixedPrimerSpecs) {
+    print "\n=== Injection des amorces fixees / Fixed Primer Injection ===\n";
+    my $fixed_results_r = injectFixedPrimers(
+      $inputMSA, \@fixedPrimerSpecs,
+      $primerMinMatchPercent, $primerIupacMinPercent, $minPrimerCoverage,
+      $maxTotalDegen, $maxConsecDegen, $max3PrimeDegen,
+      $maxToleratedMismatches, $threePrimeZoneSize, $minBaseFrequency
+    );
+    # Fusionner les amorces fixees dans chaque pool / Merge fixed primers into each pool
+    unshift @outerForwardPrimers,  @{ $fixed_results_r->{"F3"}    // [] };
+    unshift @outerReversePrimers,  @{ $fixed_results_r->{"B3"}    // [] };
+    unshift @middleForwardPrimers, @{ $fixed_results_r->{"F2"}    // [] };
+    unshift @middleReversePrimers, @{ $fixed_results_r->{"B2"}    // [] };
+    unshift @innerForwardPrimers,  @{ $fixed_results_r->{"F1C"}   // [] };
+    unshift @innerReversePrimers,  @{ $fixed_results_r->{"B1C"}   // [] };
+    unshift @loopForwardPrimers,   @{ $fixed_results_r->{"FLOOP"} // [] };
+    unshift @loopBackPrimers,      @{ $fixed_results_r->{"BLOOP"} // [] };
+    print "=== Injection terminee / Fixed Primer Injection done ===\n\n";
+  }
+
 
   print "Analyzing outer forward primers\n";
   my $outerForwardPrimerMeasurements_r =
@@ -1392,7 +1577,7 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
                   last if ($loopLocation > $loopEndAt);
 
                   # --- DYNAMIC THERMAL FILTER (Inner vs Loop) ---
-                  next if (abs($innerTm - $loopTm) > $maxTmDiff);
+                  next if (abs($innerTm - $loopTm) > $maxTmDiff && !($innerInfo->hasTag("is_fixed") || $loopInfo->hasTag("is_fixed")));
               }
               
               # 3.2 Calculate Search Bounds for Middle Primer (F2) (Structure: F3-F2-LF-F1c)
@@ -1434,9 +1619,9 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
                           if ($includeLoopPrimers) {
                               next if ($middleLocation + $middleLength + $minPrimerSpacing > $loopLocation - $loopLength + 1);
                               next if ($middleLocation + $middleLength + $loopMinGap > $innerLocation);
-                              next if (abs($loopTm - $midTm) > $maxTmDiff);
+                              next if (abs($loopTm - $midTm) > $maxTmDiff && !($loopInfo->hasTag("is_fixed") || $middleInfo->hasTag("is_fixed")));
                           } else {
-                              next if (abs($innerTm - $midTm) > $maxTmDiff);
+                              next if (abs($innerTm - $midTm) > $maxTmDiff && !($innerInfo->hasTag("is_fixed") || $middleInfo->hasTag("is_fixed")));
                           }
                           
                           my $outerStartAt = $searchStartAt;
@@ -1462,7 +1647,7 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
                                       my ($outerLocation, $outerLength, $outerPenalty, $outTm) = @{$masterOuterF_data_r->[$k]};
                                       
                                       next if ($outerLocation + $outerLength + $minPrimerSpacing > $middleLocation);
-                                      next if (abs($midTm - $outTm) > $maxTmDiff);
+                                      next if (abs($midTm - $outTm) > $maxTmDiff && !($middleInfo->hasTag("is_fixed") || $outerInfo->hasTag("is_fixed")));
                                       
                                       my $middleToOuterDistance = $middleLocation - ($outerLocation + $outerLength);
                                       my $spacingPenalty = 0;
@@ -1531,7 +1716,8 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
                           my $elapsed = time() - $_sig_fwd_t0 + 0.001;
                           my $eta = ($total_done < $innerForwardCount) ? int(($innerForwardCount - $total_done) / ($total_done / $elapsed)) : 0;
                           my $rate = $total_done / $elapsed;
-                          printf("[LAVA-PROGRESS] Signatures Forward|%d|%d|Sig: %d|%.1f it/s|%d", $total_done, $innerForwardCount, $total_hits, $rate, $eta);
+                          printf("[LAVA-PROGRESS] Signatures Forward|%d|%d|Sig: %d|%.1f it/s|%d
+", $total_done, $innerForwardCount, $total_hits, $rate, $eta);
                           my $old_h = select(STDOUT); $| = 1; select($old_h);
                       }
                   }
@@ -1722,11 +1908,11 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
                           my ($middleLocation, $middleLength, $middlePenalty, $midTm) = @{$masterMiddleR_data_r->[$j]};
                           
                           if ($includeLoopPrimers) {
-                              next if ($middleLocation - $middleLength + 1 - $minPrimerSpacing <= $loopLocation);
-                              next if ($innerLocation + $loopMinGap > $middleLocation - $middleLength + 1);
-                              next if (abs($loopTm - $midTm) > $maxTmDiff);
+                              next if ($middleLocation - $minPrimerSpacing < $loopLocation + $loopLength - 1);
+                              next if ($middleLocation - $loopMinGap < $innerLocation + $innerLength);
+                              next if (abs($loopTm - $midTm) > $maxTmDiff && !($loopInfo->hasTag("is_fixed") || $middleInfo->hasTag("is_fixed")));
                           } else {
-                              next if (abs($innerTm - $midTm) > $maxTmDiff);
+                              next if (abs($innerTm - $midTm) > $maxTmDiff && !($innerInfo->hasTag("is_fixed") || $middleInfo->hasTag("is_fixed")));
                           }
                           
                           my $outerStartAt = $middleLocation + $minPrimerSpacing;
@@ -1823,7 +2009,8 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
                           my $elapsed = time() - $_sig_rev_t0 + 0.001;
                           my $eta = ($total_done < $innerReverseCount) ? int(($innerReverseCount - $total_done) / ($total_done / $elapsed)) : 0;
                           my $rate = $total_done / $elapsed;
-                          printf("[LAVA-PROGRESS] Signatures Reverse|%d|%d|Sig: %d|%.1f it/s|%d", $total_done, $innerReverseCount, $total_hits, $rate, $eta);
+                          printf("[LAVA-PROGRESS] Signatures Reverse|%d|%d|Sig: %d|%.1f it/s|%d
+", $total_done, $innerReverseCount, $total_hits, $rate, $eta);
                           my $old_h = select(STDOUT); $| = 1; select($old_h);
                       }
                   }
