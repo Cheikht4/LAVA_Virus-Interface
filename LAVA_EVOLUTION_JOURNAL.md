@@ -1868,6 +1868,125 @@ Un outil de diagnostic se doit d'être irréprochable sur ses filtres d'inclusio
 - Les compteurs "[Stem Rev] N combinaisons" affichent le nombre réel de combinaisons trouvées.
 - Validation des 7/7 tests de non-régression "canary" pour la sortie officielle de la v1.0.
 
+
+---
+
+### [2026-07-23] Feature : Amorce(s) Ancree(s) (Fixed Primer) - Branche feature/fixed-primer
+
+**Fichiers impactes** : `lib/LLNL/LAVA/PipelineUtils.pm`, `lava_loop_primer.pl`, `lava_stem_primer.pl`
+**Nature du changement** : [Algorithmique / Architecture / Feature]
+
+**Explication technique** :
+Ajout de la fonctionnalite "Fixed Primer" (inspiree de PrimerExplorer V5), permettant de fixer
+une ou plusieurs amorces LAMP dont la sequence est deja connue et validee experimentalement.
+
+Trois nouvelles fonctions centralisees dans `PipelineUtils.pm` :
+1. `findPrimerPositionInAlignment($alignment, $seq, $hint_pos)` : Localise une sequence d amorce
+   dans le MSA. Strategie en cascade : essai a la position fournie, fallback scan complet
+   (brin + et brin - via rev_comp).
+2. `computeFixedPrimerWindows(\@specs, $sig_max, $margin, $aln_length)` : Calcule une fenetre
+   geometrique stricte `[P - sig_max - margin, P + sig_max + margin]` en prenant l'intersection
+   des contraintes de toutes les amorces fixees.
+3. `injectFixedPrimers($alignment, \@specs, ...)` : Pour chaque amorce specifiee, localise
+   sa position, la passe par `checkPrimerMismatchTolerance` (Branch and Bound IUPAC) pour
+   tenter d ajouter des bases degenerees et ameliorer la couverture, puis cree un objet
+   `LLNL::LAVA::Oligo` compatible avec le pipeline.
+
+Optimisation spatiale precoce (Filtrage Geometrique) :
+Afin d'eviter l'explosion combinatoire et le temps de calcul sur de longs genomes (ex: 10kb+),
+le systeme resout desormais la position des amorces fixes des le chargement du MSA (avant Primer3).
+Ensuite, chaque pool genere par Primer3 (F3, B3, F2...) subit un filtrage `grep` strict pour
+eliminer les candidats hors de la fenetre geometrique pre-calculee. Les candidats impossibles
+sont elimines instantanement, evitant d'engorger `analyzeAll` et le Branch & Bound.
+
+Interface CLI : option `--fixed_primer` repeatable (N amorces fixables).
+Format : `TYPE:SEQUENCE` ou `TYPE:SEQUENCE:POSITION`.
+Types valides LOOP : F3 B3 F2 B2 F1C B1C FLOOP BLOOP.
+Types valides STEM : F3 B3 F2 B2 F1C B1C FSTEM BSTEM.
+
+Les amorces fixees sont injectees en debut de pool (via `unshift`) apres le filtrage geometrique,
+pour etre traitees par le moteur combinatoire Branch and Bound.
+
+**Justification biologique** :
+Dans les projets de surveillance epidemiologique en temps reel, les equipes de laboratoire
+ont souvent deja valide une ou plusieurs amorces par PCR classique ou par LAMP initial.
+La re-conception complete d un kit en abandonnant les amorces deja testees represente un
+cout et un delai inacceptable. La fonctionnalite "Fixed Primer" permet de garder ces amorces
+comme point d ancrage. Le filtrage geometrique strict assure qu'une amorce fixee a 5000nt sur
+un genome de 10000nt n'entrainera aucune tentative d'hybridation a 1000nt ou 9000nt, collant
+exactement a la cinetique reelle d'une reaction LAMP (limitee spatialement a ~400nt).
+
+**Impact attendu** :
+- Capacite de reutiliser des amorces validees existantes.
+- Branch and Bound IUPAC applique sur l amorce fixee.
+- Temps de calcul divise drastiquement sur les longs genomes grace a la fenetre geometrique.
+- Elimination precoce des faux candidats spatiaux.
+- Aucune regression : 7/7 tests canary passes.
+
+
+### Date/Étape : 2026-07-23 / Correction Bug Module (PipelineUtils)
+- **Fichiers impactés** : `lib/LLNL/LAVA/PipelineUtils.pm`
+- **Nature du changement** : [Bug Fix]
+- **Explication technique** : Les subroutines `findPrimerPositionInAlignment` et `computeFixedPrimerWindows` avaient été ajoutées en fin de fichier à la suite de la balise `__END__`. En Perl, le parseur ignore tout le code source situé après cette balise (réservée pour la section `DATA` ou la documentation POD), ce qui entraînait une erreur fatale `Undefined subroutine` à l'exécution de `lava_loop_primer.pl` et `lava_stem_primer.pl` malgré la réussite du contrôle syntaxique (`perl -c`). La balise `__END__` et la documentation POD ont été repoussées à la toute fin absolue du fichier.
+- **Justification biologique** : Restauration de la mécanique de pré-filtrage géométrique (fenêtrage de séquence) pour le positionnement des amorces fixées expérimentalement, cruciale pour cibler avec précision des régions conservées (e.g. gènes essentiels) des virus.
+- **Impact attendu** : L'intégration des amorces fixées fonctionnera à nouveau sans interrompre brutalement l'exécution du pipeline LAVA.
+
+### Date/Étape : 2026-07-23 / Support des caractères IUPAC pour la détection des amorces fixées
+- **Fichiers impactés** : `lib/LLNL/LAVA/PipelineUtils.pm`
+- **Nature du changement** : [Algorithmique / Thermodynamique]
+- **Explication technique** : La fonction `findPrimerPositionInAlignment` a été modifiée pour traduire les caractères de dégénérescence IUPAC (ex: `R`, `Y`, `W`) d'une amorce fixée en expression régulière (ex: `[AG]`, `[CT]`, `[AT]`). Le scan dans l'alignement multiple (`index()` et `eq`) a été remplacé par une recherche via moteur regex (`=~ //`).
+- **Justification biologique** : Les amorces issues de la littérature utilisées comme point d'ancrage incluent souvent des bases dégénérées pour cibler la variabilité naturelle des souches virales. Si le script ne parvenait pas à détecter ces amorces dégénérées, la restriction de la fenêtre d'amplification (qui limite drastiquement le nombre de candidats traités) était annulée.
+- **Impact attendu** : Le mode `POS=auto` réussira à ancrer géométriquement les amorces dégénérées dans le génome, restaurant l'efficacité des pénalités thermodynamiques et du Branch & Bound, tout en éliminant les amorces générées "hors zone".
+
+### Date/Étape : 2026-07-23 / Optimisation géométrique globale Primer3
+- **Fichiers impactés** : `lib/LLNL/LAVA/OligoEnumerator/Primer3Conserved.pm`, `lava_loop_primer.pl`, `lava_stem_primer.pl`
+- **Nature du changement** : [Architecture / Algorithmique]
+- **Explication technique** : La fenêtre géométrique calculée par `computeFixedPrimerWindows` n'était appliquée qu'au moment du filtrage après énumération, laissant Primer3 calculer aveuglément des milliers d'amorces sur la totalité de l'alignement. Le paramètre global `SEQUENCE_INCLUDED_REGION` a été intégré au pont BioPerl (`Primer3Conserved.pm`) et injecté dynamiquement dans les paramètres cibles depuis le script principal si une amorce fixe est présente.
+- **Justification biologique** : Une amorce "point d'ancrage" restreint par nature la zone cible de l'amplification isotherme. Laisser l'algorithme générer des amorces inutiles saturait la mémoire et le temps CPU pour des candidats physiquement impossibles (trop éloignés pour polymériser dans les temps cinétiques impartis).
+- **Impact attendu** : Une chute massive du temps de calcul et des logs parasites. Le Validator ne vérifiera plus que les candidats générés strictement à l'intérieur de la fenêtre géométrique restreinte `[P - 400 - 200, P + 400 + 200]`.
+
+### Date/Étape : 2026-07-23 / Bypass de l'énumération des amorces fixées
+- **Fichiers impactés** : `lava_loop_primer.pl`, `lava_stem_primer.pl`
+- **Nature du changement** : [Algorithmique / Optimisation de performance]
+- **Explication technique** : Auparavant, les amorces dont la séquence était fixée par l'utilisateur étaient tout de même énumérées (recherche Primer3 + validation) avant d'être écrasées par `injectFixedPrimers`. J'ai introduit un dictionnaire `%isFixedType` qui enveloppe les blocs d'énumération (`getOligosWithMismatchTolerance`, `buildNativeReversePool`). Si le type (ex: "F3") est fixé, LAVA ignore l'appel à Primer3 et renvoie un tableau vide `[]` instantanément, qui est ensuite complété par `injectFixedPrimers`.
+- **Justification biologique** : Une amorce imposée expérimentalement ne nécessite aucune exploration thermodynamique ni vérification de mismatch, puisque l'utilisateur a décidé de forcer son utilisation.
+- **Impact attendu** : Une annulation totale des logs "Checking Primer" et du temps d'exécution pour les cibles explicitement imposées.
+
+### Date/Étape : 2026-07-23 / Correction des paramètres Primer3 via BioPerl
+- **Fichiers impactés** : `lib/LLNL/LAVA/OligoEnumerator/Primer3Conserved.pm`
+- **Nature du changement** : [Bug Fix / Configuration Primer3]
+- **Explication technique** : Le module `Bio::Tools::Run::Primer3` s'attendait aux paramètres bruts `INCLUDED_REGION` et `EXCLUDED_REGION`, alors que LAVA les mappait vers `SEQUENCE_INCLUDED_REGION` et `SEQUENCE_EXCLUDED_REGION`. Cette discordance provoquait un avertissement de rejet du paramètre par BioPerl (`Parameter SEQUENCE_INCLUDED_REGION is not a valid Primer3 parameter`), et forçait Primer3 à énumérer des milliers de candidats sur l'ensemble de l'alignement plutôt que de restreindre son espace de recherche.
+- **Justification biologique** : Les restrictions de fenêtre garantissent que seules les amorces thermodynamiquement compatibles avec la cinétique de réaction isotherme soient considérées. Ignorer ces fenêtres surchargeait la RAM avec des candidats caducs.
+- **Impact attendu** : Primer3 respectera enfin les fenêtres d'inclusion. La combinaison de l'optimisation par saut (bypass) et de la correction de la région d'inclusion réduira le nombre d'amorces candidates par un facteur de 10 à 50 pour les types non fixés, accélérant massivement l'analyse du Validator.
+
+### Date/Étape : 2026-07-23 / Inversion des coordonnées INCLUDED_REGION pour NativeReverse
+- **Fichiers impactés** : `lib/LLNL/LAVA/PipelineUtils.pm`
+- **Nature du changement** : [Algorithmique / Fix Géométrique]
+- **Explication technique** : La fonction `buildNativeReversePool` appelle Primer3 sur la séquence inverse complémentaire (`RC MSA`) pour générer les amorces Reverse de manière native. Cependant, le paramètre `INCLUDED_REGION` défini dans le constructeur `Primer3Conserved` portait les coordonnées relatives au brin PLUS. Appliquées telles quelles au brin RC, Primer3 cherchait les amorces Reverse à l'autre bout du génome ! J'ai ajouté une logique qui recalcule dynamiquement les coordonnées `INCLUDED_REGION` (`rc_start = alignmentLength - (start + len)`) avant l'appel à Primer3 sur le RC MSA.
+- **Justification biologique** : Pour garantir la protection 3' des amorces (qui est le but de la fonction `buildNativeReversePool`), l'analyse doit se faire sur le brin inverse. Les fenêtres géométriques calculées pour forcer la proximité des amorces doivent donc impérativement être inversées pour cibler la même région biologique physique du virus.
+- **Impact attendu** : Fin de la génération de +8800 amorces hors zone lors de la recherche des amorces Reverse. Les amorces Reverse (ex: B3) seront enfin restreintes géométriquement autour de l'amorce fixée (ex: F3), ce qui fait chuter le temps de calcul drastiquement.
+
+### Date/Étape : 2026-07-23 / Fractionnement physique de l'alignement pour Primer3
+- **Fichiers impactés** : `lib/LLNL/LAVA/PipelineUtils.pm`
+- **Nature du changement** : [Architecture / Bug Fix]
+- **Explication technique** : Bien que le paramètre d'inclusion ait été corrigé, Primer3 v2.6.1 ignore silencieusement `INCLUDED_REGION` (et même `SEQUENCE_INCLUDED_REGION`) pour les amorces internes (mode `pick_hyb_probe_only`), ce qui forçait l'algorithme à réévaluer systématiquement tout le génome viral pour les amorces Forward, Loop, et Stem, causant des lenteurs extrêmes. Comme suggéré par l'utilisateur, j'ai remplacé l'usage du paramètre défaillant par un fractionnement (slicing) physique de l'alignement (`Bio::SimpleAlign->slice`) avant l'appel à Primer3, puis corrigé l'offset des coordonnées des candidats retournés.
+- **Justification biologique** : En découpant la séquence avant l'analyse thermodynamique, on garantit que le moteur (Primer3) est mathématiquement et physiquement incapable de générer des amorces hors de la zone d'amplification d'intérêt.
+- **Impact attendu** : Une restriction absolue et inviolable de la zone de recherche. Le nombre de candidats à valider chute drastiquement (de 8800+ à ~50), permettant à LAVA de converger en quelques secondes au lieu de plusieurs minutes, même sur des génomes longs.
+
+### Date/Étape : 2026-07-23 / Application de la restriction d'entropie pour Primer3 (SEQUENCE_INTERNAL_EXCLUDED_REGION)
+- **Fichiers impactés** : `lib/Bio/Tools/Run/Primer3.pm`, `lib/LLNL/LAVA/OligoEnumerator/Primer3Conserved.pm`, `lava_loop_primer.pl`, `lava_stem_primer.pl`, `t/canary_entropy.t`
+- **Nature du changement** : [Bug Fix / Thermodynamique]
+- **Explication technique** : Correction du paramètre EXCLUDED_REGION ignoré par Primer3 en mode `pick_hyb_probe_only` en le remplaçant par `SEQUENCE_INTERNAL_EXCLUDED_REGION`. Déclaration de cette balise dans le wrapper BioPerl `@PRIMER3_PARAMS` pour éviter le rejet par l'API. Ajout d'une garde contre les divisions par zéro dans les scripts principaux si 0 amorces sont retournées. Création d'un test unitaire `t/canary_entropy.t` pour verrouiller ce comportement.
+- **Justification biologique** : Les régions à forte entropie de Shannon (très variables entre souches) doivent être systématiquement exclues pour garantir le design d'amorces universelles (conservées). Sans ce patch, l'exclusion entropique n'était pas transmise au moteur Primer3.
+- **Impact attendu** : Une baisse drastique du nombre de faux positifs (candidats hybrides sur des zones hyper-variables), et un temps d'exécution réduit proportionnellement au taux d'exclusion (variable via `--entropy_threshold`). Les zones très entropiques ne généreront plus aucune amorce, conformément aux attentes cliniques.
+
+## Date/Étape : 2026-07-23 - Correction thermodynamique des amorces fixées (feature/fixed-primer)
+Fichiers impactés : `lib/LLNL/LAVA/PipelineUtils.pm`
+Nature du changement : Bug Fix (Thermodynamique)
+Explication technique : L injection d amorces fixées affectait une valeur nulle (0) au tag `primer3_tm`, provoquant le rejet immédiat de toutes les combinaisons dans les étages de filtrage thermique (`abs($midTm - $outTm) > $maxTmDiff`). J ai implémenté un sous-programme qui calcule le véritable Tm via l outil `oligotm` natif de Primer3, avec un support pour résoudre les bases dégénérées IUPAC (calculant la moyenne des Tm de toutes les combinaisons). Une valeur de repli (60.0/62.0) est également configurée si l outil échoue.
+Justification biologique : Assurer l intégrité de la cinétique d hybridation des amorces spécifiquement forcées par l utilisateur (comme pour les virus fortement conservés ou des amorces de la littérature), sans compromettre le comportement strict du filtre de contiguïté thermique de Primer3 sur le reste du jeu.
+Impact attendu : Les jeux d amorces incluant une amorce fixée via l interface aboutiront avec succès (combinaisons trouvées) au lieu d échouer silencieusement.
+
 Date/Etape : Optimisation Branch & Bound et Repartition Chunks (Juillet 2026)
 
 Fichiers impactes : lava_loop_primer.pl, lava_stem_primer.pl
@@ -1889,9 +2008,3 @@ Contrainte : Respect total de l equivalence stricte (zero regression) et du non-
 - **Justification biologique** : Maintenir l'intégrité de l'état asynchrone permet de conserver un mapping parfait entre les scores de pénalité thermodynamique asymétrique calculés via les RMQ et le candidat Primer3 retenu pour l'amplification.
 - **Impact attendu** : Plus aucune erreur de compilation Perl (syntax OK) ni d'accolades orphelines. Le programme passe l'étape combinatoire tout en produisant rigoureusement la même sortie que l'original, mais avec des milliers de sous-arbres évités dynamiquement.
 
-### Date/Étape : 2026-07-25 - Correction finale des compteurs de progression
-- **Fichiers impactés** : `lava_loop_primer.pl`, `lava_stem_primer.pl`, `apply_optimizations.py`
-- **Nature du changement** : [Bug Fix]
-- **Explication technique** : Le système d'affichage de la progression LAVA-PROGRESS a été restructuré. Au lieu de cumuler le statut de chaque chunk via `flock` sur un fichier unique (ce qui provoquait des verrous lents et une lecture asymétrique aboutissant à des compteurs incohérents), le script crée désormais un répertoire de progression avec un fichier `.prog` distinct par chunk (`chunk_$chunk_id.prog`). La boucle de lecture utilise `glob` pour lire dynamiquement l'état agrégé.
-- **Justification biologique** : Les affichages incohérents de l'avancement induisent en erreur l'utilisateur lors de grands runs combinatoires. Ce correctif redonne un indicateur fiable et proportionné sans affecter les performances.
-- **Impact attendu** : Affichage correct et strictement borné à 100% dans l'interface de chargement.

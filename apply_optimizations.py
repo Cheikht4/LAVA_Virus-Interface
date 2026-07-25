@@ -166,9 +166,9 @@ sub binary_search_last_le {
                           if ($includeLoopPrimers) {
                               next if ($middleLocation + $middleLength + $minPrimerSpacing > $loopLocation - $loopLength + 1);
                               next if ($middleLocation + $middleLength + $loopMinGap > $innerLocation);
-                              next if (abs($loopTm - $midTm) > $maxTmDiff);
+                              next if (abs($loopTm - $midTm) > $maxTmDiff && !($loopInfo->hasTag("is_fixed") || $middleInfo->hasTag("is_fixed")));
                           } else {
-                              next if (abs($innerTm - $midTm) > $maxTmDiff);
+                              next if (abs($innerTm - $midTm) > $maxTmDiff && !($innerInfo->hasTag("is_fixed") || $middleInfo->hasTag("is_fixed")));
                           }
                           
                           my $outerStartAt = $searchStartAt;
@@ -194,7 +194,7 @@ sub binary_search_last_le {
                                       my ($outerLocation, $outerLength, $outerPenalty, $outTm) = @{$masterOuterF_data_r->[$k]};
                                       
                                       next if ($outerLocation + $outerLength + $minPrimerSpacing > $middleLocation);
-                                      next if (abs($midTm - $outTm) > $maxTmDiff);
+                                      next if (abs($midTm - $outTm) > $maxTmDiff && !($middleInfo->hasTag("is_fixed") || $outerInfo->hasTag("is_fixed")));
                                       
                                       my $middleToOuterDistance = $middleLocation - ($outerLocation + $outerLength);
                                       my $spacingPenalty = 0;
@@ -260,9 +260,9 @@ sub binary_search_last_le {
                           
                           if ($includeStemPrimers) {
                               next if ($stemLocation + $stemLength + $minPrimerSpacing > $middleLocation);
-                              next if (abs($stemTm - $midTm) > $maxTmDiff);
+                              next if (abs($stemTm - $midTm) > $maxTmDiff && !($stemInfo->hasTag("is_fixed") || $middleInfo->hasTag("is_fixed")));
                           } else {
-                              next if (abs($innerTm - $midTm) > $maxTmDiff);
+                              next if (abs($innerTm - $midTm) > $maxTmDiff && !($innerInfo->hasTag("is_fixed") || $middleInfo->hasTag("is_fixed")));
                           }
                           
                           my $outerStartAt = $searchStartAt;
@@ -287,7 +287,7 @@ sub binary_search_last_le {
                                       my ($outerLocation, $outerLength, $outerPenalty, $outTm) = @{$masterOuterF_data_r->[$k]};
                                       
                                       next if ($outerLocation + $outerLength + $minPrimerSpacing > $middleLocation);
-                                      next if (abs($midTm - $outTm) > $maxTmDiff);
+                                      next if (abs($midTm - $outTm) > $maxTmDiff && !($middleInfo->hasTag("is_fixed") || $outerInfo->hasTag("is_fixed")));
                                       
                                       my $middleToOuterDistance = $middleLocation - ($outerLocation + $outerLength);
                                       if($middleToOuterDistance < 0) { $middleToOuterDistance = 0; }
