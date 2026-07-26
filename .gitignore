@@ -1,24 +1,99 @@
-__pycache__/
-*.py[cod]
-*$py.class
+# =============================================================================
+# .gitignore — LAVA_Virus-Interface (interface + moteur)
+# Source code only - no generated outputs
+# =============================================================================
+
+# --------------- Environnements Python ---------------
 lava_env/
 venv/
 env/
-.env
+.venv/
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+*.egg
+.Python
+build/
+dist/
+.eggs/
+wheels/
+
+# --------------- Resultats LAVA (generes) ------------
+*.primers
+*.all_signatures
+*.dash
+*.primers.primers
+*_signatures_individuelles/
+dengue_small*/
+
+# --------------- Uploads / Results (contenu ignore, .gitkeep suivi) --
 uploads/*
 !uploads/.gitkeep
 results/*
 !results/.gitkeep
+
+# --------------- Sorties de tests (generees, hors baseline) --
+t/canary_loop
+t/canary_loop.*
+t/canary_loop_amplified*
+t/canary_loop_signatures_individuelles/
+t/canary_stem
+t/canary_stem.*
+t/canary_stem_amplified*
+t/canary_stem_signatures_individuelles/
+t/canary_stem_combinations.txt
+t/canary_stem_excluded*
+!t/baseline/
+t/*.log
+t/optimized_stem.log
+t/baseline_loop.log
+t/baseline_stem.log
+t/reference_a_stem.log
+
+# --------------- Logs d'execution --------------------
 *.log
+*.out
+*.err
+
+# --------------- Fichiers temporaires ----------------
+temp/
+tmp/
 *.tmp
 *.bak
 *.backup
-.DS_Store
-cookies.txt
+*.save
+*.old
+*.orig
 
-t/canary_*_signatures_individuelles/
-t/canary_*_amplified*
-t/canary_*_excluded*
-t/canary_stem_combinations.txt
-t/canary_loop*
-t/canary_stem*
+# --------------- Fichiers systeme macOS/Windows ------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+*Zone.Identifier
+*＊Zone.Identifier
+
+# --------------- Editeurs ----------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --------------- Fichiers de config secrets ----------
+.env
+.env.local
+*.pid
+*.lock
+
+# --------------- Archives ----------------------------
+*.zip
+*.tar.gz
+*.7z
+
+# --------------- Fichiers de dev jetables ------------
+_internal/
