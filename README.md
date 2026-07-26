@@ -72,3 +72,14 @@ sudo ./deploy.sh
 
 * **Moteur scientifique Perl (`lava_loop_primer.pl`, `lava_stem_primer.pl`, modules hérités)** : sous licence open-source BSD 3-Clause (LLNL / Clinton Torres / Cheikh Talibouya).
 * **Interface Graphique Web & Suite de Déploiement (`lava_flask_app.py`, `templates/`, `static/`, `deployment/`)** : **Licence Propriétaire - Tous droits réservés (Cheikh Talibouya)**. L'utilisation, la reproduction, la modification, la distribution ou le déploiement clinique/commercial de cette interface web est strictement soumis à l'autorisation écrite préalable de l'auteur. Voir le fichier `LICENSE` pour les détails complets.
+
+## Vérification de l'installation
+
+Vous pouvez vérifier que le moteur scientifique fonctionne correctement en lançant un test de fumée avec les données de test fournies (dossier `t_data/`) :
+
+```bash
+# Vérifier la conception d'amorces STEM sur un gène cible (S. aureus)
+perl lava_stem_primer.pl --params t_data/s_aureus_parameters.xml
+```
+
+Si la commande réussit, vous verrez des fichiers de sortie générés dans le dossier courant (ex: `results_stem_*.primers`). Assurez-vous d'avoir installé les modules Perl `BioPerl` et `XML::LibXML` et que `primer3_core` est bien dans le PATH.
