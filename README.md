@@ -56,6 +56,19 @@ chmod +x deploy.sh
 sudo ./deploy.sh
 ```
 
+**⚠️ Étape de sécurité critique (Service Public)**
+Pour sécuriser les cookies de session et activer le CSRF, vous DEVEZ générer une clé secrète statique.
+Créez le fichier `/etc/lava-dna/lava.env` :
+```bash
+sudo mkdir -p /etc/lava-dna
+echo "SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(24))')" | sudo tee /etc/lava-dna/lava.env
+sudo chown lavauser:lavauser /etc/lava-dna/lava.env
+sudo chmod 600 /etc/lava-dna/lava.env
+sudo systemctl restart lava-dna
+```
+
+> **Note :** Tout redémarrage de Gunicorn (`systemctl restart lava-dna`) purge intégralement la file d'attente en cours, car celle-ci est gérée de manière volatile en mémoire pour des raisons de performance.
+
 ---
 ## Architecture du Répertoire
 
