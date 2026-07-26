@@ -66,3 +66,9 @@ sudo ./deploy.sh
 - `deployment/` : Scripts et fichiers de configuration pour la production (Nginx/systemd).
 - `lava_loop_primer.pl` / `lava_stem_primer.pl` : Moteurs scientifiques Perl.
 - `lib/` : Modules algorithmiques et thermodynamiques Perl LAVA.
+
+---
+## Licence & Droits d'Utilisation / License & Terms of Use
+
+* **Moteur scientifique Perl (`lava_loop_primer.pl`, `lava_stem_primer.pl`, modules hérités)** : sous licence open-source BSD 3-Clause (LLNL / Clinton Torres / Cheikh Talibouya).
+* **Interface Graphique Web & Suite de Déploiement (`lava_flask_app.py`, `templates/`, `static/`, `deployment/`)** : **Licence Propriétaire - Tous droits réservés (Cheikh Talibouya)**. L'utilisation, la reproduction, la modification, la distribution ou le déploiement clinique/commercial de cette interface web est strictement soumis à l'autorisation écrite préalable de l'auteur. Voir le fichier `LICENSE` pour les détails complets.
