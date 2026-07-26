@@ -7,7 +7,6 @@ Ce dépôt constitue le package officiel autonome de l'interface graphique web (
 ### Fonctionnalités principales
 - **Interface bilingue complète (FR / EN)** : Bascule instantanée de la langue pour la configuration, la surveillance en temps réel (barre de progression LAVA-Progress) et les diagnostics d'échec.
 - **Support des virus variables et références uniques** : Calcul combinatoire proportionnel à la taille de la région cible avec tolérance aux codes IUPAC et validation d'alignement FASTA.
-- **Amorces Fixées & Mode Strict** : Injection d'amorces certifiées (F1/B1, F2/B2, etc.) avec calcul thermodynamique asymétrique du Tm et contrôle total sur l'optimisation dégénérée (B&B).
 - **Sécurité et Robustesse** : Cookies de session sécurisés (`HttpOnly`, `SameSite=Lax`), contrôle d'intégrité des fichiers téléchargés et gestion d'arrière-plan résiliente.
 - **Package de Déploiement Production** : Fichiers de configuration Nginx (`deployment/nginx_lava.conf`), service systemd (`deployment/lava-dna.service`) et Gunicorn (`deployment/gunicorn_config.py`).
 
@@ -20,7 +19,6 @@ This repository provides the standalone web interface package (Flask / Gunicorn 
 ### Key Features
 - **Full Bilingual Interface (FR / EN)** : Instant language switching across parameter configuration, live monitoring (LAVA-Progress bar), and technical error diagnosis.
 - **Support for Highly Variable Viruses & Single References** : Proportional combinatorial search with unrestricted IUPAC degeneracy support and strict FASTA alignment validation.
-- **Fixed Primers & Strict Mode** : Injection of certified primers (F1/B1, F2/B2, etc.) with asymmetric thermodynamic evaluation and full control over degenerate optimization (B&B).
 - **Security & Robustness** : Hardened session cookies (`HttpOnly`, `SameSite=Lax`), upload validation, and resilient background task management.
 - **Production Deployment Suite** : Includes Nginx configuration (`deployment/nginx_lava.conf`), systemd service files (`deployment/lava-dna.service`), and Gunicorn configuration (`deployment/gunicorn_config.py`).
 
@@ -68,9 +66,3 @@ sudo ./deploy.sh
 - `deployment/` : Scripts et fichiers de configuration pour la production (Nginx/systemd).
 - `lava_loop_primer.pl` / `lava_stem_primer.pl` : Moteurs scientifiques Perl.
 - `lib/` : Modules algorithmiques et thermodynamiques Perl LAVA.
-
----
-## Licence & Droits d'Utilisation / License & Terms of Use
-
-* **Moteur scientifique Perl (`lava_loop_primer.pl`, `lava_stem_primer.pl`, modules hérités)** : sous licence open-source BSD 3-Clause (LLNL / Clinton Torres / Cheikh Talibouya).
-* **Interface Graphique Web & Suite de Déploiement (`lava_flask_app.py`, `templates/`, `static/`, `deployment/`)** : **Licence Propriétaire - Tous droits réservés (Cheikh Talibouya)**. L'utilisation, la reproduction, la modification, la distribution ou le déploiement clinique/commercial de cette interface web est strictement soumis à l'autorisation écrite préalable de l'auteur. Voir le fichier `LICENSE` pour les détails complets.
