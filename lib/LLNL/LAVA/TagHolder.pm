@@ -263,9 +263,9 @@ sub getAllTagNames
 =head2 hasTag
 
  Usage     : if ($tagHolder->hasTag("foo")) { ... }
- Function  : Alias pratique pour getTagExists() — vérifie l'existence d'un tag.
-              Convenient alias for getTagExists() — checks if a tag exists.
-              Replaces the fragile eval{getTag()}/check $@ pattern.
+ Function  : Alias pratique pour getTagExists() - vérifie l'existence d'un tag.
+             Convenient alias for getTagExists() - checks if a tag exists.
+             Replaces the fragile eval{getTag()}/check $@ pattern.
  Arguments : String - name of the property to test for
  Example   : See Usage
  Returns   : Bool ($TRUE or $FALSE) - whether the requested property exists

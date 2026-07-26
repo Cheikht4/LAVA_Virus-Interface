@@ -591,6 +591,30 @@
                         <div class="form-text">{{ 'files_will_be_named'|t }}</div>
                     </div>
 
+                    <!-- Fixed Primers (Dynamic Rows) -->
+                    <div class="mb-4 p-3 border rounded bg-light">
+                        <label class="form-label fw-bold text-primary"><i class="fas fa-anchor me-2"></i>{{ 'fixed_primers'|t }}</label>
+                        <div class="form-text mb-3">
+                            {{ 'fixed_primers_desc'|t }}
+                        </div>
+                        
+                        <div id="fixed_primers_list">
+                            <!-- Les lignes dynamiques s'ajouteront ici -->
+                        </div>
+                        
+                        <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addFixedPrimerRow()">
+                            <i class="fas fa-plus me-1"></i> {{ 'add_fixed_primer'|t }}
+                        </button>
+                        
+                        <!-- Checkbox for Strict Mode -->
+                        <div class="form-check mt-3 border-top pt-2">
+                            <input class="form-check-input" type="checkbox" name="fixed_primer_strict" id="fixed_primer_strict" value="1">
+                            <label class="form-check-label" for="fixed_primer_strict">
+                                <strong>{{ 'fixed_primer_strict'|t }}</strong> - {{ 'fixed_primer_strict_desc'|t }}
+                            </label>
+                        </div>
+                    </div>
+
                     <button type="submit" class="btn btn-warning btn-lg">
                         <i class="fas fa-rocket me-2"></i>{{ 'execute_button'|t }}
                     </button>
@@ -773,6 +797,41 @@
             console.error(err);
             alert('Erreur lors de l\'envoi du fichier de paramètres');
         });
+    }
+
+    function addFixedPrimerRow() {
+        const container = document.getElementById('fixed_primers_list');
+        const row = document.createElement('div');
+        row.className = 'row mb-2 fixed-primer-row align-items-center';
+        row.innerHTML = `
+            <div class="col-md-3">
+                <select class="form-select fp-type" name="fp_type[]">
+                    <option value="F3">F3</option>
+                    <option value="B3">B3</option>
+                    <option value="F2">F2</option>
+                    <option value="B2">B2</option>
+                    <option value="F1C">F1</option>
+                    <option value="B1C">B1</option>
+                    <option value="FLOOP">FLOOP</option>
+                    <option value="BLOOP">BLOOP</option>
+                    <option value="FSTEM">FSTEM</option>
+                    <option value="BSTEM">BSTEM</option>
+                </select>
+            </div>
+            <div class="col-md-5">
+                <input type="text" class="form-control fp-seq" name="fp_seq[]" placeholder="{{ 'sequence_placeholder'|t }}" required>
+            </div>
+            <div class="col-md-3">
+                <input type="number" class="form-control fp-pos" name="fp_pos[]" placeholder="{{ 'position_placeholder'|t }}" min="0">
+                <div class="form-text" style="font-size: 0.75rem;">{{ 'position_help'|t }}</div>
+            </div>
+            <div class="col-md-1">
+                <button type="button" class="btn btn-outline-danger btn-sm w-100" onclick="this.closest('.fixed-primer-row').remove()">
+                    <i class="fas fa-trash"></i>
+                </button>
+            </div>
+        `;
+        container.appendChild(row);
     }
 </script>
 {% endblock %}

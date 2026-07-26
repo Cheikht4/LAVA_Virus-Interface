@@ -98,6 +98,8 @@ TRANSLATIONS = {
         'three_prime_zone': 'Zone 3\' (bases)',
         'max_dist_outer_middle': 'Dist. Max Outer-Middle',
         'max_dist_middle_inner': 'Dist. Max Middle-Inner',
+        'fixed_primer_strict': 'Mode Strict',
+        'fixed_primer_strict_desc': 'Désactiver l\'optimisation B&B (conserve la séquence exacte)',
         'penalty_plateau': 'Plateau de Pénalité (0.1-0.5)',
         'penalty_slope': 'Pente Sigmoïde (0.05-0.5)',
         'stem_orientation': 'Orientation STEM',
@@ -119,6 +121,12 @@ TRANSLATIONS = {
         'max_per_window_label': 'Max candidats / fenêtre',
         'max_per_window_desc': 'Nombre max d\'amorces gardées par fenêtre. 0 = désactivé. Ex: 3 = 3 meilleurs par fenêtre.',
         'spatial_reduction_info': 'Garde les K meilleurs candidats par fenêtre de W nucléotides. Réduit le temps de calcul sans sacrifier la diversité spatiale. Valeurs recommandées : Fenêtre=10, Max=3.',
+        'fixed_primers': 'Amorces Fixées (Optionnel)',
+        'fixed_primers_desc': 'Fixe and use specific primer sequence.',
+        'add_fixed_primer': 'Ajouter une amorce fixée',
+        'sequence_placeholder': 'Séquence (ex: ACGT...)',
+        'position_placeholder': 'Position (opt.)',
+        'position_help': 'Pos de départ',
         'save_params': 'Sauvegarder les paramètres',
         'import_params': 'Importer un fichier de paramètres',
         'params_imported': 'Paramètres importés et appliqués avec succès !',
@@ -300,6 +308,8 @@ TRANSLATIONS = {
         'three_prime_zone': '3\' Zone (bases)',
         'max_dist_outer_middle': 'Max Dist. Outer-Middle',
         'max_dist_middle_inner': 'Max Dist. Middle-Inner',
+        'fixed_primer_strict': 'Strict Mode',
+        'fixed_primer_strict_desc': 'Disable B&B optimization (keeps exact sequence)',
         'penalty_plateau': 'Penalty Plateau (0.1-0.5)',
         'penalty_slope': 'Sigmoid Slope (0.05-0.5)',
         # Clés manquantes EN / Missing EN keys
@@ -318,6 +328,12 @@ TRANSLATIONS = {
         'max_per_window_label': 'Max candidates / window',
         'max_per_window_desc': 'Max primers kept per window. 0 = disabled. E.g. 3 = 3 best per window.',
         'spatial_reduction_info': 'Keeps the K best candidates per W-nucleotide window. Drastically reduces computation time without sacrificing spatial diversity. Recommended: Window=10, Max=3.',
+        'fixed_primers': 'Fixed Primers (Optional)',
+        'fixed_primers_desc': 'Fix and use specific primer sequence.',
+        'add_fixed_primer': 'Add fixed primer',
+        'sequence_placeholder': 'Sequence (e.g. ACGT...)',
+        'position_placeholder': 'Position (opt.)',
+        'position_help': 'Start pos',
         'save_params': 'Save parameters',
         'import_params': 'Import parameters file',
         'params_imported': 'Parameters successfully imported and applied!',
@@ -1124,6 +1140,8 @@ def execute_lava_background(execution_id, script_type, input_file, output_name, 
             'window_size', 'max_per_window',
             # Parallélisation multi-cœurs / Multi-core parallelization
             'threads',
+            # Fixed primers options
+            'fixed_primer_optimize',
         }
 
         # Paramètres spécifiques à LOOP
@@ -1150,7 +1168,7 @@ def execute_lava_background(execution_id, script_type, input_file, output_name, 
         
         # Ajouter les paramètres
         for param_name, param_value in params.items():
-            if param_value is not None and param_name not in ['script_type', 'lamp_mode']:
+            if param_value is not None and param_name not in ['script_type', 'lamp_mode', 'fixed_primers']:
                 # Convertir les booléens en entiers pour les scripts Perl
                 if isinstance(param_value, bool):
                     param_value = 1 if param_value else 0
@@ -1165,6 +1183,14 @@ def execute_lava_background(execution_id, script_type, input_file, output_name, 
                     cmd.extend([f"--{perl_param_name}", str(param_value)])
                 else:
                     print(f"⚠️  Paramètre ignoré (non supporté par Perl): {param_name} -> {perl_param_name}")
+        
+        # Traitement special pour les amorces fixees (champ texte multi-lignes)
+        if 'fixed_primers' in params and params['fixed_primers']:
+            fixed_lines = params['fixed_primers'].strip().split('\n')
+            for line in fixed_lines:
+                line = line.strip()
+                if line:
+                    cmd.extend(["--fixed_primer", line])
         
         # Sauvegarder les paramètres dans un fichier texte pour la traçabilité
         params_file_path = f"{output_base}.params.txt"
@@ -1402,9 +1428,30 @@ def execute_lava():
         _apply_lamp_mode(session['params'], request.form['lamp_mode'], script_type)
     elif 'lamp_mode' not in session['params']:
         session['params']['lamp_mode'] = 'classic'
+        
+    # --- Traitement des amorces fixees (tableaux dynamiques) ---
+    fp_types = request.form.getlist('fp_type[]')
+    fp_seqs = request.form.getlist('fp_seq[]')
+    fp_poss = request.form.getlist('fp_pos[]')
+    
+    fp_list = []
+    # Parcourir et construire la chaine multiline (une par ligne)
+    for i in range(len(fp_types)):
+        if i < len(fp_seqs) and fp_seqs[i].strip():
+            fp_str = f"{fp_types[i]}:{fp_seqs[i].strip()}"
+            if i < len(fp_poss) and fp_poss[i].strip():
+                fp_str += f":{fp_poss[i].strip()}"
+            fp_list.append(fp_str)
+            
+    if fp_list:
+        session['params']['fixed_primers'] = "\n".join(fp_list)
+    elif 'fixed_primers' in session['params']:
+        del session['params']['fixed_primers']
+        
+    session['params']['fixed_primer_optimize'] = 0 if request.form.get('fixed_primer_strict') == '1' else 1
     
     for key, value in request.form.items():
-        if key not in ['script_type', 'lamp_mode', 'output_name']:
+        if key not in ['script_type', 'lamp_mode', 'output_name', 'fp_type[]', 'fp_seq[]', 'fp_pos[]', 'fixed_primer_strict']:
             if key in ['include_stem_primers', 'include_loop_primers']:
                 session['params'][key] = value == 'on'
             else:
