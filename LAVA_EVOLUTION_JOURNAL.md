@@ -2093,3 +2093,46 @@ Bien qu'une amorce soit "fixée" et imposée par l'utilisateur, forcer sa pénal
 
 **Impact attendu :** 
 Les amorces fixées afficheront une vraie valeur dans les rapports (ex: `Thm[I:0.3]`). Le score global (`penalty`) des signatures contenant des amorces fixées sera plus réaliste et directement comparable aux résultats standard, sans biaiser le tri final des candidats.
+
+### Date/Étape : 2026-07-26 - Correction du calcul d'espacement (Spacing Penalty) sur le brin reverse
+**Fichiers impactés** : `lava_loop_primer.pl`
+**Nature du changement** : [Thermodynamique / Bug Fix]
+**Explication technique** : La formule de calcul de la distance `innerToLoopDistance` sur le brin Reverse était inversée : `($loopLocation - $loopLength) - $innerLocation`. Cela produisait des distances négatives lorsque les boucles se croisaient, provoquant un accès hors-tableau (index négatif) dans la table des pénalités Perl, ce qui appliquait silencieusement la pire pénalité possible (index -1 = dernière valeur). La formule a été corrigée pour `$loopLocation - ($innerLocation + 1)`, devenant ainsi symétrique au brin Forward.
+**Justification biologique** : Un calcul de distance négatif n'a pas de sens physique (il implique un chevauchement non géré ou un repliement stérique impossible pour l'enzyme). En corrigeant cette distance, la pénalité d'espacement (Spacing Penalty `I_L`) redevient proportionnelle à l'éloignement réel entre l'amorce interne et l'amorce de boucle sur le brin complémentaire.
+**Impact attendu** : Des pénalités globales beaucoup plus faibles et précises pour les signatures LOOP, permettant de découvrir des amorces qui étaient injustement rejetées par un score faussé (ex: pénalité chutant de 63.6 à 13.6).
+
+### Date/Étape : 2026-07-26 - Finalisation de l'infrastructure de tests continus (Canary Baseline)
+**Fichiers impactés** : `t/canary_regression.t`, `t/baseline/` (les 3 dépôts)
+**Nature du changement** : [Architecture]
+**Explication technique** : L'implémentation du test d'équivalence stricte. Le test canary génère des signatures (`.primers`, `.all_signatures`, `.dash`) puis fait un `strict_diff` ligne par ligne contre des références prouvées (baselines). Les tests non-déterministes (`_amplified.fasta`) sont validés sur leur volumétrie. Ajout du flag environnemental `LAVA_UPDATE_BASELINE=1` permettant la regénération contrôlée des fichiers de référence en cas d'évolution volontaire de l'algorithme.
+**Justification biologique** : Tout changement dans la thermodynamique du moteur (ex: l'ajout du Branch & Bound ou de l'entropie) doit garantir une non-régression absolue sur des agents pathogènes de référence comme le Rotavirus. Sans comparaison des séquences ATGC générées à la lettre près, une altération silencieuse pourrait fausser un design d'amorces sans faire planter le programme.
+**Impact attendu** : Sécurité absolue lors de la publication scientifique. Toute modification future de la cinétique d'hybridation fera échouer le CI si elle modifie les amorces sortantes non prévues.
+
+Date/Étape : 26 Juillet 2026 - Transformation en Service Public LAVA-DNA
+Fichiers impactés : lava_flask_app.py, templates/index.html, templates/monitor.html, deployment/lava-dna.service, deployment/gunicorn_config.py, deployment/nginx_lava.conf, requirements_flask.txt, README.md
+Nature du changement : Architecture / Sécurité
+Explication technique : 
+- Mise en place d une file d attente FIFO asynchrone (job scheduler) dans le processus Flask qui empêche le rejet massif de requêtes.
+- Application d un plafond strict de threads CPU (MAX_THREADS_PER_RUN=8).
+- Ajout de la validation structurale (alignement et taille) du FASTA avec limitation stricte à 4000 séquences et 15000 nucléotides lors de l upload.
+- Intégration de os.killpg pour permettre l abandon propre des jobs et de leurs processus enfants Perl via un groupe de processus lors du dépassement du MAX_RUNTIME_SECONDS d une heure.
+- Extraction de la clé Flask SECRET_KEY dans un fichier environnement local et activation de CSRFProtect et ProxyFix.
+Justification biologique : 
+L application LAVA devenant publique, il est impératif que le modèle de concurrence ne surcharge pas le serveur qui exécute les calculs complexes thermodynamiques et combinatoires des amorces LAMP, tout en filtrant les requêtes excessives (dépassements de plafonds d alignement).
+Impact attendu : Le serveur sera protégé contre les DoS liés aux jobs de grande envergure, les fichiers FASTA immenses seront rejetés immédiatement, et les utilisateurs verront leur position dans une file d attente plutôt que de se faire rejeter leur requête.
+
+### [2026-07-27] Restauration Thermodynamique des Amorces Fixées
+
+Fichiers impactés : `lib/LLNL/LAVA/PipelineUtils.pm`
+
+Nature du changement : [Thermodynamique / Bug Fix]
+
+Explication technique : 
+Le moteur LAVA utilisait historiquement la tâche `check_primers` avec les paramètres `PRIMER_LEFT` et `PRIMER_RIGHT` pour évaluer les amorces fixées par l'utilisateur. Cependant, les amorces individuelles passées via `SEQUENCE_INTERNAL_OLIGO` n'étaient pas notées correctement car Primer3 exige l'utilisation des paramètres internes (ex: `PRIMER_INTERNAL_SALT_MONOVALENT`, `PRIMER_INTERNAL_DNTP_CONC`, etc.) et retourne les résultats sous la clé `PRIMER_INTERNAL_PENALTY`. Le module Bio::Tools::Primer3 était également sujet à un plantage critique via la méthode `next_primer()` si la séquence gauche n'était pas fournie.
+Le fix remplace `next_primer()` par `primer_results(0)` et mappe scrupuleusement tous les arguments vers les équivalents `PRIMER_INTERNAL_*` tout en forçant `PRIMER_PICK_ANYWAY=1` pour autoriser l'extraction des scores même si les critères optimaux de Primer3 ne sont pas respectés.
+
+Justification biologique : 
+L'évaluation des amorces fixées par l'utilisateur (via l'interface ou `--fixed_primer`) se retrouvait avec des pénalités à `0.00` ou divergentes des amorces générées dynamiquement. Ce différentiel de notation nuisait fortement à l'assemblage et à la comparaison des candidats LAMP complets (ex: une amorce F2 imposée subissait une notation asymétrique par rapport à une F2 générée naturellement). La restauration de la parité thermodynamique complète assure une continuité dans la fonction d'évaluation (cinétique de l'ADN à 65°C).
+
+Impact attendu : La notation des amorces fixées sera scrupuleusement identique à celle des amorces natives générées par le pipeline, permettant un assemblage beaucoup plus rigoureux et transparent pour l'utilisateur final qui s'attend à une vraie pénalisation de Primer3 sur la séquence qu'il a fournie.
+
