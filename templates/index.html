@@ -613,8 +613,11 @@
                     <!-- Fixed Primers (Dynamic Rows) -->
                     <div class="mb-4 p-3 border rounded bg-light">
                         <label class="form-label fw-bold text-primary"><i class="fas fa-anchor me-2"></i>{{ 'fixed_primers'|t }}</label>
-                        <div class="form-text mb-3">
+                        <div class="form-text mb-2">
                             {{ 'fixed_primers_desc'|t }}
+                        </div>
+                        <div class="form-text text-muted mb-3 small">
+                            <i class="fas fa-info-circle me-1"></i>{{ 'fixed_primers_degen_note'|t }}
                         </div>
                         
                         <div id="fixed_primers_list">
