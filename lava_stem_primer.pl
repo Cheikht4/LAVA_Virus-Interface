@@ -477,7 +477,7 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
   # TODO: Probably want to be able to use multiple files for parameter
   # definition, so we can have the thermo parameters set, and separately have
   # the file IO parameters.
-  GetOptions(%optionMap);
+  GetOptions(%optionMap) or die "FATAL: Options de ligne de commande invalides (Unknown option).\n";
   loadOptionsFromFile(\%options);
   my $options_r = \%options;
 
