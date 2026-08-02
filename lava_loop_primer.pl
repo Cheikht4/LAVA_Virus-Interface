@@ -714,10 +714,10 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
   {
     my $maxDistOuterMiddle = 
       optionWithDefault($options_r, "max_dist_outer_middle",
-        $optionDefaults{"max_dist_outer_middle"});
+        $signatureMaxLength);
     my $maxDistMiddleInner =
       optionWithDefault($options_r, "max_dist_middle_inner",
-        $optionDefaults{"max_dist_middle_inner"});
+        $signatureMaxLength);
 
     # --- CORRECTION DE CONFLIT LOOP (Phase 36) ---
     # maxDistMiddleInner représente la distance cible / maxDistMiddleInner represents the target distance (Middle -> Inner) / 2 = F2_len + gap(F2, F1c).
@@ -2436,7 +2436,7 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
           
           # Validity Checks
           next if ($inner_gap < 0); # Overlap
-          next if ($inner_gap > 100); # Too far apart (Inner Gap Limit)
+          # next if ($inner_gap > 100); # Too far apart (Inner Gap Limit)
 
           # VALIDATION COMPLETE D'ESPACEMENT - tous les primers de la signature
           # Full spacing validation - all primers in the signature (mirrors STEM behavior)
