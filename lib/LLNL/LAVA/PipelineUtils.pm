@@ -41,7 +41,6 @@ our @EXPORT_OK = qw(
   createAmplificationFiles
   analyzeSignatureCombinations
   generateCombinations
-  calculateDynamicPairLengths
   reducePrimersByWindow
   buildNativeReversePool
   getOligosWithMismatchTolerance
@@ -308,9 +307,6 @@ sub getOligosWithMismatchTolerance {
   $pm->run_on_finish(sub {
     my ($pid, $exit_code, $ident, $signal, $core, $data_ref) = @_;
     if (defined $data_ref && ref($data_ref) eq 'HASH') {
-      foreach my $msg (@{$data_ref->{logs} // []}) {
-        print $msg;
-      }
       push @validatedPrimers, @{$data_ref->{validated} // []};
       $strict_count     += $data_ref->{strict}   // 0;
       $degenerate_count += $data_ref->{degen}    // 0;
@@ -360,25 +356,21 @@ sub getOligosWithMismatchTolerance {
           $validatedPrimer->setTag("compatible_sequence_ids", $compatible_seq_ids);
           $validatedPrimer->setTag("compatible_sequence_vec", _build_bit_vector($compatible_seq_ids));
           $chunk_degen++;
-          push @chunk_logs, "DEGENERATE PRIMER acceptee - Pos: $location, Couv: " . sprintf("%.1f", $coverage_percent) . "%, Seq: $final_sequence\n";
         } else {
           $validatedPrimer->setTag("is_degenerate", 0);
           $validatedPrimer->setTag("iupac_coverage", "100.0");
           $validatedPrimer->setTag("compatible_sequence_ids", $compatible_seq_ids);
           $validatedPrimer->setTag("compatible_sequence_vec", _build_bit_vector($compatible_seq_ids));
           $chunk_strict++;
-          push @chunk_logs, "STRICT PRIMER acceptee     - Pos: $location, Couv: 100.0%, Seq: $final_sequence\n" if ($chunk_strict <= 10);
         }
         push @chunk_validated, $validatedPrimer;
       } else {
         $chunk_reject++;
-        push @chunk_logs, "REJECTED PRIMER - Pos: $location, Couv: " . sprintf("%.1f", $coverage_percent) . "% < ${min_primer_acceptance}%\n" if ($chunk_reject <= 5);
       }
     }
 
     $pm->finish(0, {
       validated => \@chunk_validated,
-      logs      => \@chunk_logs,
       strict    => $chunk_strict,
       degen     => $chunk_degen,
       rejected  => $chunk_reject
@@ -546,9 +538,6 @@ sub buildNativeReversePool {
   $pm->run_on_finish(sub {
     my ($pid, $exit_code, $ident, $signal, $core, $data_ref) = @_;
     if (defined $data_ref && ref($data_ref) eq 'HASH') {
-      foreach my $msg (@{$data_ref->{logs} // []}) {
-        print $msg;
-      }
       push @validatedPrimers, @{$data_ref->{validated} // []};
       $strict_count   += $data_ref->{strict}   // 0;
       $degen_count    += $data_ref->{degen}    // 0;
@@ -603,25 +592,21 @@ sub buildNativeReversePool {
           $validatedPrimer->setTag("compatible_sequence_ids", $compatibleIds);
           $validatedPrimer->setTag("compatible_sequence_vec", _build_bit_vector($compatibleIds));
           $chunk_degen++;
-          push @chunk_logs, "REVERSE DEGENERATE acceptee - PosRC: $posInRC -> GenomPos: $genomicLocation, Couv: " . sprintf("%.1f", $coveragePct) . "%, Seq: $finalSeq\n";
         } else {
           $validatedPrimer->setTag("is_degenerate", 0);
           $validatedPrimer->setTag("iupac_coverage", "100.0");
           $validatedPrimer->setTag("compatible_sequence_ids", $compatibleIds);
           $validatedPrimer->setTag("compatible_sequence_vec", _build_bit_vector($compatibleIds));
           $chunk_strict++;
-          push @chunk_logs, "REVERSE STRICT acceptee   - PosRC: $posInRC -> GenomPos: $genomicLocation, Couv: 100.0%, Seq: $finalSeq\n";
         }
         push @chunk_validated, $validatedPrimer;
       } else {
         $chunk_reject++;
-        push @chunk_logs, "REVERSE REJECTED           - PosRC: $posInRC -> GenomPos: $genomicLocation, Couv: " . sprintf("%.1f", $coveragePct) . "% < ${min_primer_coverage}%\n" if ($chunk_reject <= 5);
       }
     }
 
     $pm->finish(0, {
       validated => \@chunk_validated,
-      logs      => \@chunk_logs,
       strict    => $chunk_strict,
       degen     => $chunk_degen,
       rejected  => $chunk_reject
@@ -1603,41 +1588,7 @@ sub analyzeSignatureCombinations {
 
 #-------------------------------------------------------------------------------
 
-=head2 calculateDynamicPairLengths
 
-  Calcule dynamiquement les longueurs cibles des paires Middle et Inner
-  a partir des contraintes de distance maximale entre niveaux de primers.
-  Dynamically computes target pair lengths from max distance constraints.
-
-  Parametres / Parameters:
-    outer_pair_target  - Longueur cible de la paire Outer
-    max_dist_outer_middle - Distance max F3-F2
-    max_dist_middle_inner - Distance max F2-F1
-    min_inner_pair_spacing - Espacement minimum F1-B1
-
-  Retourne / Returns: ($middlePairTarget, $innerPairTarget)
-
-=cut
-
-sub calculateDynamicPairLengths {
-  my ($outer_pair_target, $max_dist_outer_middle, $max_dist_middle_inner, $min_inner_pair_spacing) = @_;
-  
-  print "\nINFO: Calcul dynamique des longueurs cibles active.\n";
-  print "INFO: Dynamic target length calculation activated.\n";
-  
-  my $middle_pair_target = $outer_pair_target - (2 * $max_dist_outer_middle);
-  print "  -> Cible Middle Pair calculee : $middle_pair_target nt (distance max: $max_dist_outer_middle nt)\n";
-  
-  my $inner_pair_target = $middle_pair_target - (2 * $max_dist_middle_inner);
-  print "  -> Cible Inner Pair calculee : $inner_pair_target nt (distance max: $max_dist_middle_inner nt)\n";
-  
-  if ($inner_pair_target < $min_inner_pair_spacing) {
-    print "WARNING: La cible Inner Pair ($inner_pair_target nt) < distance minimale F1-B1 ($min_inner_pair_spacing nt).\n";
-  }
-  print "--------------------------------------------------\n\n";
-  
-  return ($middle_pair_target, $inner_pair_target);
-}
 
 #-------------------------------------------------------------------------------
 

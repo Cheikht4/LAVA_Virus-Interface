@@ -46,18 +46,32 @@ require Exporter;
 # Ratios: F3-F2 (12%), F2-F1 (18%), F1-B1 (40%)
 # L'utilisateur fournit L (longueur totale estimée de la signature LAMP) / User provides L (estimated total length of LAMP signature)
 sub calculate_proportional_geometry {
-    my ($L) = @_;
+    my ($L, $max_L, $sum_primer_lengths) = @_;
     
-    # Valeurs par défaut si L non fourni ou trop petit / Default values if L not provided or too small
+    # Valeurs par défaut si non fournies
     $L = 250 unless (defined $L && $L > 50);
+    $max_L = $L unless (defined $max_L && $max_L >= $L);
+    $sum_primer_lengths = 144 unless defined $sum_primer_lengths; # 8 amorces de 18nt par défaut en LOOP
+    
+    # Calcul de l'espace libre réel / Calculate real available spacing
+    my $available_total = $L - $sum_primer_lengths;
+    $available_total = 10 if $available_total < 10; # Sécurité / Safety
+    
+    my $available_max = $max_L - $sum_primer_lengths;
+    $available_max = $available_total if $available_max < $available_total;
 
-    # Conversion en entiers pour éviter les problèmes d'arrondi plus tard / Convert to integers to avoid rounding issues later
+    # Conversion en entiers pour éviter les problèmes d'arrondi
     my $geometry = {
-        'f3_f2_target' => int($L * 0.12),
-        'f2_f1_target' => int($L * 0.18),
-        'inner_target' => int($L * 0.40), # Distance F1c-B1c
-        'b1_b2_target' => int($L * 0.18), # Symétrique
-        'b2_b3_target' => int($L * 0.12)  # Symétrique
+        'f3_f2_target'       => int($available_total * 0.12),
+        'f3_f2_borne_haute'  => int($available_max * 0.12),
+        'f2_f1_target'       => int($available_total * 0.18),
+        'f2_f1_borne_haute'  => int($available_max * 0.18),
+        'inner_target'       => int($available_total * 0.40), # Distance F1c-B1c
+        'inner_borne_haute'  => int($available_max * 0.40),
+        'b1_b2_target'       => int($available_total * 0.18),
+        'b1_b2_borne_haute'  => int($available_max * 0.18),
+        'b2_b3_target'       => int($available_total * 0.12),
+        'b2_b3_borne_haute'  => int($available_max * 0.12)
     };
 
     return $geometry;
@@ -77,40 +91,24 @@ sub calculate_proportional_geometry {
 #
 # Paramètres / Parameters:
 #   actual         - Distance réelle observée / Actual observed distance
-#   target         - Distance cible idéale proportionnelle / Ideal proportional target distance
-#   plateau_ratio  - Pourcentage au-dessus de la cible toléré sans pénalité / Plateau ratio above target
+#   threshold      - Distance limite gratuite / Free tolerance threshold
 #   k_slope        - Facteur de pente pour la montée de pénalité / Slope factor for penalty increase
 #
 sub generateSigmoidPenalty {
-    my ($actual, $target, $plateau_ratio, $k_slope) = @_;
+    my ($actual, $threshold, $k_slope) = @_;
     
     # Valeurs par défaut si non fournies / Default values if not provided
-    $plateau_ratio = 0.25 unless defined $plateau_ratio;
     $k_slope = 0.15 unless defined $k_slope;
     
     return 100 if $actual < 0; 
     
-    # Les distances plus courtes ou égales à la cible sont idéales cinétiquement (pas de pénalité)
-    # Distances shorter than or equal to the target are kinetically ideal (no penalty)
-    return 0 if $actual <= $target;
+    # Les distances plus courtes ou égales à la limite sont idéales cinétiquement (pas de pénalité)
+    return 0 if $actual <= $threshold;
     
-    # Paramètres de la montée progressive au-dessus de la cible
-    # Parameters for progressive rise above target
-    my $L_plateau_width = $target * $plateau_ratio; # Plateau "gratuit" de + X% au-dessus de la cible
     my $max_penalty = 100;
+    my $excess = $actual - $threshold;
     
-    my $diff = $actual - $target;
-    
-    # Si l'excès reste dans le plateau de tolérance gratuit, pas de pénalité
-    # If the excess remains within the free tolerance plateau, no penalty
-    return 0 if $diff <= $L_plateau_width;
-
-    # Calcul de la pénalité progressive au-delà du plateau
-    # Calculation of progressive penalty beyond the plateau
-    my $excess = $diff - $L_plateau_width;
-    
-    # Formule Sigmoïde corrigée (commence à 0 après la limite du plateau)
-    # Corrected Sigmoid Formula (starts at 0 after the plateau limit)
+    # Formule Sigmoïde corrigée (commence à 0 après la limite)
     # P(x) = max_penalty * [ (2 / (1 + exp(-k * x))) - 1 ]
     my $penalty = $max_penalty * ( (2 / (1 + exp(-$k_slope * $excess))) - 1 );
     
@@ -123,12 +121,12 @@ sub generateSigmoidPenalty {
 # Remplace l'ancienne fonction basée sur les paraboles. / Replaces the old parabola-based function.
 # Génère un tableau de pénalités pour toutes les distances possibles jusqu'à maxDistance. / Generates an array of penalties for all possible distances up to maxDistance.
 sub generateDistancePenalties {
-    my ($maxDistance, $targetLength, $plateau_ratio, $k_slope) = @_;
+    my ($maxDistance, $threshold, $k_slope) = @_;
     
     my @penalties = ();
     
     for (my $i = 0; $i < $maxDistance; $i++) {
-        $penalties[$i] = generateSigmoidPenalty($i, $targetLength, $plateau_ratio, $k_slope);
+        $penalties[$i] = generateSigmoidPenalty($i, $threshold, $k_slope);
     }
     
     return \@penalties;

@@ -121,13 +121,13 @@ my $common_args =
     "--middle_primer_min_tm 59.0 --middle_primer_target_tm 60.0 --middle_primer_max_tm 65.0 " .
     "--outer_primer_min_length 15 --outer_primer_target_length 18 --outer_primer_max_length 22 " .
     "--outer_primer_min_tm 57.0 --outer_primer_target_tm 58.0 --outer_primer_max_tm 59.0 " .
-    "--max_dist_middle_inner 30 --max_dist_outer_middle 30 --min_primer_coverage 70.0 " .
+    "--min_primer_coverage 70.0 " .
     "--resolve_overlap_by coverage " .
     "--max_3prime_degenerate_bases 0 --max_consecutive_degenerate_bases 2 " .
     "--max_total_degenerate_bases 3 --max_poly_bases 5 --max_tolerated_mismatches 2 " .
     "--max_tm_diff 5.0 --primer_iupac_min_percent 80.0 --primer_min_match_percent 70.0 " .
     "--min_base_frequency 0.2 --three_prime_zone_size 3 --salt_monovalent 50.0 " .
-    "--salt_divalent 8.0 --penalty_plateau 0.25 --penalty_slope 0.15 " .
+    "--salt_divalent 8.0 " .
     "--max_overlap_percent 0.0 --max_per_window 0 --max_primer_gen 10000.0 --window_size 0";
 
 # =============================================================================
