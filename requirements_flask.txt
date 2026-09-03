@@ -4,3 +4,6 @@
 flask==3.0.3
 werkzeug==3.0.3
 Flask-WTF==1.2.1
+# Serveur WSGI de production / Production WSGI server
+gunicorn==22.0.0
+

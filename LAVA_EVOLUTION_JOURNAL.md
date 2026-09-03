@@ -2178,3 +2178,25 @@ Une amorce dégénérée n'est pas une molécule unique, mais un MÉLANGE physiq
   - Correction du mapping du paramètre `minimum_signature_coverage` vers `signature_common_target_min_percent` (au lieu de `min_signature_coverage`).
 - **Justification biologique / technique :** Les processus longs (ex: Primer3) ou les scripts Perl générant de nombreuses erreurs pouvaient bloquer le flux de la requête HTTP. L'usage de `subprocess.PIPE` avec des threads garantit que l'interface restera réactive et évitera les deadlocks (interblocages). Le paramètre de couverture de signature a été renommé pour correspondre exactement à la variable attendue par LAVA dans son module Options.pm.
 - **Impact attendu :** L'interface Flask ne bloquera plus silencieusement si un script Perl échoue ou si STDERR se remplit. Les erreurs de validation ou de timeout s'afficheront en rouge directement dans les logs en temps réel.
+
+### [2026-09-03] Synchronisation des Fichiers de Deploiement et Hardening Production
+
+Date/Etape : 2026-09-03 - Synchronisation de la configuration systemd, du script deploy.sh et des dependances de production.
+
+Fichiers impactes : `deployment/lava-dna.service`, `deployment/deploy.sh`, `requirements_flask.txt`, `README.md`, `LAVA_EVOLUTION_JOURNAL.md`.
+
+Nature du changement : [Architecture / Bug Fix]
+
+Explication technique : 
+1. Remplacement dans `deployment/lava-dna.service` de la variable obsolete `MAX_USER_CONCURRENT_RUNS` par `MAX_USER_QUEUED_JOBS=2` pour s'aligner avec la gestion de file d'attente implementee dans `lava_flask_app.py`.
+2. Ajout des variables d'environnement manquantes dans l'unite systemd : `MAX_QUEUED_JOBS=30`, `MAX_IP_QUEUED_JOBS=3` et `SESSION_COOKIE_SECURE=True`.
+3. Ajout de `gunicorn==22.0.0` dans `requirements_flask.txt` afin de garantir que le serveur WSGI invoque par `ExecStart` soit installe par pip.
+4. Refonte complete de `deployment/deploy.sh` : creation securisee de `/etc/lava-dna/lava.env` avec une cle `SECRET_KEY` aleatoire et stable (droits 600, proprietaire `lavauser`), creation des dossiers `uploads/` et `results/` avec permissions restreintes, suppression des dependances obsoletes non utilisees (Redis), verification de la presence des modules BioPerl (`Bio::AlignIO`, `Bio::SeqIO`, `Bio::SimpleAlign`, `Bio::LocatableSeq`), `Parallel::ForkManager` et des binaires `primer3_core` / `oligotm`.
+5. Documentation explicite dans le `README.md` des dependances scientifiques Perl et binaires systeme.
+
+Justification biologique : 
+Le dimensionnement precis de la file d'attente (`MAX_QUEUED_JOBS`, `MAX_USER_QUEUED_JOBS`, `MAX_IP_QUEUED_JOBS`) et des threads alloues (`MAX_THREADS_PER_RUN=8`) garantit que les calculs thermodynamiques complexes de signatures LAMP multi-alignements s'executent sans saturation de la memoire ou surcharge du processeur sur le serveur de production, tout en preservant l'integrite de la file FIFO pour chaque utilisateur.
+
+Impact attendu : 
+Application stricte et effective des quotas utilisateurs et IP en production. Suppression des anomalies de deconnexion ou rejets silencieux lors des soumissions concurrentes. Deploiement reproductible et cle en main sur serveur Linux.
+

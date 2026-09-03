@@ -1,17 +1,21 @@
 #!/bin/bash
-# Script de déploiement automatique pour LAVA-DNA
+# ==============================================================================
+# Script de deploiement automatise pour LAVA-DNA (Production)
+# Automated deployment script for LAVA-DNA (Production)
+# ==============================================================================
 set -e
 
-echo "🚀 Déploiement LAVA-DNA sur serveur de production"
-echo "================================================"
+echo "=== Deploiement LAVA-DNA sur serveur de production ==="
+echo "======================================================="
 
-# Variables de configuration
-DOMAIN="your-domain.com"  # Remplacez par votre domaine
-EMAIL="admin@your-domain.com"  # Pour Let's Encrypt
+# Configuration par defaut / Default configuration
+DOMAIN="${DOMAIN:-your-domain.com}"
+EMAIL="${EMAIL:-admin@your-domain.com}"
 LAVA_PATH="/opt/lava-dna"
 LAVA_USER="lavauser"
+LAVA_ENV_FILE="/etc/lava-dna/lava.env"
 
-# Couleurs pour l'affichage
+# Couleurs pour l'affichage / Output colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -29,16 +33,16 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Vérifier que le script est exécuté en tant que root
+# Verifier les privileges root / Verify root privileges
 if [[ $EUID -ne 0 ]]; then
-   print_error "Ce script doit être exécuté en tant que root"
+   print_error "Ce script doit etre execute en tant que root (ou avec sudo)."
    exit 1
 fi
 
-print_status "Mise à jour du système..."
+print_status "1. Mise a jour des paquets systeme..."
 apt update && apt upgrade -y
 
-print_status "Installation des dépendances système..."
+print_status "2. Installation des dependances systeme, Perl et binaires..."
 apt install -y \
     nginx \
     python3 \
@@ -48,146 +52,150 @@ apt install -y \
     build-essential \
     cpanminus \
     bioperl \
+    primer3 \
     libmodule-build-perl \
     libdata-stag-perl \
     libgetopt-long-descriptive-perl \
     liblist-moreutils-perl \
+    libparallel-forkmanager-perl \
+    libxml-libxml-perl \
     certbot \
     python3-certbot-nginx \
-    redis-server \
     git \
     curl \
     htop \
     ufw
 
-print_status "Installation des modules Perl..."
-cpanm Bio::Perl Bio::SeqIO Bio::AlignIO
+print_status "3. Installation et verification des modules BioPerl essentiels..."
+cpanm Bio::Perl Bio::SeqIO Bio::AlignIO Bio::SimpleAlign Bio::LocatableSeq Parallel::ForkManager
 
-print_status "Création de l'utilisateur lavauser..."
-if ! id "$LAVA_USER" &>/dev/null; then
-    useradd -m -s /bin/bash $LAVA_USER
-    print_status "Utilisateur $LAVA_USER créé"
+print_status "4. Verification des binaires scientifiques (primer3_core, oligotm)..."
+if command -v primer3_core &>/dev/null; then
+    print_status "primer3_core detecte : $(command -v primer3_core)"
 else
-    print_warning "Utilisateur $LAVA_USER existe déjà"
+    print_warning "primer3_core non trouve dans le PATH standard. Verification des alternatives..."
 fi
 
-print_status "Création des répertoires..."
-mkdir -p $LAVA_PATH
+print_status "5. Creation du compte systeme dedie ($LAVA_USER)..."
+if ! id "$LAVA_USER" &>/dev/null; then
+    useradd -m -s /bin/bash "$LAVA_USER"
+    print_status "Utilisateur $LAVA_USER cree."
+else
+    print_status "Utilisateur $LAVA_USER existe deja."
+fi
+
+print_status "6. Preparation de l'arborescence et des dossiers d'execution..."
+mkdir -p "$LAVA_PATH"
+mkdir -p "$LAVA_PATH/uploads"
+mkdir -p "$LAVA_PATH/results"
 mkdir -p /var/log/lava
 mkdir -p /var/run/lava
-chown -R $LAVA_USER:$LAVA_USER $LAVA_PATH /var/log/lava /var/run/lava
+mkdir -p /etc/lava-dna
 
-print_status "Copie des fichiers de l'application..."
-# Supposons que le script est exécuté depuis le répertoire du projet
-cp -r . $LAVA_PATH/
-chown -R $LAVA_USER:$LAVA_USER $LAVA_PATH
+chown -R "$LAVA_USER:$LAVA_USER" "$LAVA_PATH" /var/log/lava /var/run/lava
+chmod 750 "$LAVA_PATH/uploads" "$LAVA_PATH/results"
 
-print_status "Création de l'environnement virtuel Python..."
-sudo -u $LAVA_USER python3 -m venv $LAVA_PATH/venv
-sudo -u $LAVA_USER $LAVA_PATH/venv/bin/pip install --upgrade pip
-sudo -u $LAVA_USER $LAVA_PATH/venv/bin/pip install -r $LAVA_PATH/requirements_secure.txt
+# Si le script est lance depuis un clone local, copier les fichiers
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ "$SCRIPT_DIR" != "$LAVA_PATH" ] && [ -f "$SCRIPT_DIR/lava_flask_app.py" ]; then
+    print_status "Synchronisation des fichiers sources vers $LAVA_PATH..."
+    cp -r "$SCRIPT_DIR/"* "$LAVA_PATH/"
+    chown -R "$LAVA_USER:$LAVA_USER" "$LAVA_PATH"
+fi
 
-print_status "Configuration Nginx..."
-cp $LAVA_PATH/deployment/nginx_lava.conf /etc/nginx/sites-available/lava-dna
-sed -i "s/your-domain.com/$DOMAIN/g" /etc/nginx/sites-available/lava-dna
+print_status "7. Configuration du fichier d'environnement et cle secrete (/etc/lava-dna/lava.env)..."
+if [ ! -f "$LAVA_ENV_FILE" ]; then
+    GENERATED_SECRET=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+    echo "SECRET_KEY=$GENERATED_SECRET" > "$LAVA_ENV_FILE"
+    print_status "Cle SECRET_KEY persistante generee."
+else
+    print_status "Fichier $LAVA_ENV_FILE existant conserve."
+fi
+chown "$LAVA_USER:$LAVA_USER" "$LAVA_ENV_FILE"
+chmod 600 "$LAVA_ENV_FILE"
+
+print_status "8. Creation du virtualenv Python et installation des dependances..."
+sudo -u "$LAVA_USER" python3 -m venv "$LAVA_PATH/venv"
+sudo -u "$LAVA_USER" "$LAVA_PATH/venv/bin/pip" install --upgrade pip
+sudo -u "$LAVA_USER" "$LAVA_PATH/venv/bin/pip" install -r "$LAVA_PATH/requirements_flask.txt"
+
+print_status "9. Verification rapide de la configuration Flask..."
+sudo -u "$LAVA_USER" "$LAVA_PATH/venv/bin/python" -c "
+import os
+import flask
+import gunicorn
+print('Flask version:', flask.__version__)
+print('Gunicorn version:', gunicorn.__version__)
+"
+
+print_status "10. Configuration du service systemd..."
+cp "$LAVA_PATH/deployment/lava-dna.service" /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable lava-dna
+
+print_status "11. Configuration de Nginx..."
+cp "$LAVA_PATH/deployment/nginx_lava.conf" /etc/nginx/sites-available/lava-dna
+if [ "$DOMAIN" != "your-domain.com" ]; then
+    sed -i "s/your-domain.com/$DOMAIN/g" /etc/nginx/sites-available/lava-dna
+fi
 ln -sf /etc/nginx/sites-available/lava-dna /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
-
-print_status "Test de la configuration Nginx..."
 nginx -t
-
-print_status "Configuration du service systemd..."
-cp $LAVA_PATH/deployment/lava-dna.service /etc/systemd/system/
-systemctl daemon-reload
-
-print_status "Configuration du firewall..."
-ufw --force reset
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow ssh
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw --force enable
-
-print_status "Démarrage des services..."
-systemctl enable redis-server
-systemctl start redis-server
 systemctl enable nginx
-systemctl start nginx
-systemctl enable lava-dna
-systemctl start lava-dna
 
-print_status "Obtention du certificat SSL avec Let's Encrypt..."
-certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL
+print_status "12. Configuration des taches de nettoyage automatique (cron)..."
+(crontab -u "$LAVA_USER" -l 2>/dev/null | grep -v "$LAVA_PATH"; echo "0 2 * * * find $LAVA_PATH/uploads -type f -mtime +2 -delete") | crontab -u "$LAVA_USER" -
+(crontab -u "$LAVA_USER" -l 2>/dev/null | grep -v "$LAVA_PATH"; echo "0 3 * * * find $LAVA_PATH/results -type f -mtime +7 -delete") | crontab -u "$LAVA_USER" -
 
-print_status "Configuration du renouvellement automatique des certificats..."
-(crontab -l 2>/dev/null; echo "0 12 * * * /usr/bin/certbot renew --quiet") | crontab -
-
-print_status "Nettoyage automatique des fichiers temporaires..."
-(crontab -u $LAVA_USER -l 2>/dev/null; echo "0 2 * * * find $LAVA_PATH/uploads -type f -mtime +7 -delete") | crontab -u $LAVA_USER -
-(crontab -u $LAVA_USER -l 2>/dev/null; echo "0 3 * * * find $LAVA_PATH/results -type f -mtime +30 -delete") | crontab -u $LAVA_USER -
-
-print_status "Configuration des logs avec logrotate..."
-cat > /etc/logrotate.d/lava-dna << EOF
+print_status "13. Configuration de la rotation des logs (logrotate)..."
+cat > /etc/logrotate.d/lava-dna << 'EOF'
 /var/log/lava/*.log {
     daily
     missingok
-    rotate 30
+    rotate 14
     compress
+    delaycompress
     notifempty
-    create 0644 $LAVA_USER $LAVA_USER
+    create 0640 lavauser lavauser
+    sharedscripts
     postrotate
-        systemctl reload lava-dna
+        systemctl reload lava-dna > /dev/null 2>&1 || true
     endscript
 }
 EOF
 
-print_status "Génération d'un mot de passe admin sécurisé..."
-ADMIN_PASSWORD=$(openssl rand -base64 32)
-echo "FLASK_SECRET_KEY=$(openssl rand -hex 32)" > $LAVA_PATH/.env
-echo "LAVA_ADMIN_PASSWORD=$ADMIN_PASSWORD" >> $LAVA_PATH/.env
-chown $LAVA_USER:$LAVA_USER $LAVA_PATH/.env
-chmod 600 $LAVA_PATH/.env
-
-print_status "Redémarrage des services..."
+print_status "14. Demarrage des services..."
 systemctl restart lava-dna
 systemctl restart nginx
 
-# Vérification de l'état des services
-sleep 5
+sleep 3
 if systemctl is-active --quiet lava-dna; then
-    print_status "Service LAVA-DNA : ✅ Actif"
+    print_status "Service LAVA-DNA : [ACTIF]"
 else
-    print_error "Service LAVA-DNA : ❌ Erreur"
-    systemctl status lava-dna
+    print_error "Echec du demarrage du service LAVA-DNA"
+    journalctl -u lava-dna -n 20 --no-pager
     exit 1
 fi
 
 if systemctl is-active --quiet nginx; then
-    print_status "Service Nginx : ✅ Actif"
+    print_status "Service Nginx : [ACTIF]"
 else
-    print_error "Service Nginx : ❌ Erreur"
-    systemctl status nginx
+    print_error "Echec du demarrage du service Nginx"
+    systemctl status nginx --no-pager
     exit 1
 fi
 
 echo ""
-echo "🎉 Déploiement terminé avec succès !"
-echo "======================================="
+echo "======================================================="
+echo " Deploiement termine avec succes !"
+echo "======================================================="
 echo ""
-echo "🌐 URL d'accès : https://$DOMAIN"
-echo "👤 Compte admin : admin"
-echo "🔑 Mot de passe admin : $ADMIN_PASSWORD"
+echo " Commandes utiles pour la supervision :"
+echo " - Logs Flask/Gunicorn : journalctl -u lava-dna -f"
+echo " - Logs Nginx          : tail -f /var/log/nginx/lava_error.log"
+echo " - Redemarrer LAVA     : systemctl restart lava-dna"
+echo " - Statut du service   : systemctl status lava-dna"
 echo ""
-echo "📋 Commandes utiles :"
-echo "  - Logs de l'application : journalctl -u lava-dna -f"
-echo "  - Logs Nginx : tail -f /var/log/nginx/lava_error.log"
-echo "  - Redémarrer l'app : systemctl restart lava-dna"
-echo "  - Status des services : systemctl status lava-dna nginx"
+echo " Pour activer SSL via Let's Encrypt une fois le DNS configure :"
+echo " certbot --nginx -d $DOMAIN --agree-tos --email $EMAIL"
 echo ""
-echo "⚠️  N'oubliez pas de :"
-echo "  1. Sauvegarder le mot de passe admin affiché ci-dessus"
-echo "  2. Configurer votre DNS pour pointer vers ce serveur"
-echo "  3. Surveiller les logs lors des premiers tests"
-echo ""
-print_warning "IMPORTANT : Le mot de passe admin est stocké dans $LAVA_PATH/.env"

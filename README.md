@@ -36,13 +36,24 @@ source lava_env/bin/activate
 # 2. Installer les dépendances Python
 pip install -r requirements_flask.txt
 
-# 3. Installer les dépendances Perl / Conda (si non présentes sur le système)
-# Assurez-vous d'avoir Perl, Primer3 et BioPerl installés via environment.yml
+# 3. Installer les dépendances Perl et binaires scientifiques (BioPerl, Primer3)
+# Modules Perl requis :
+# - BioPerl (Bio::Perl, Bio::AlignIO, Bio::SeqIO, Bio::SimpleAlign, Bio::LocatableSeq)
+# - Parallel::ForkManager
+# - XML::LibXML
+# Binaires scientifiques requis dans le PATH :
+# - primer3_core
+# - oligotm
+#
+# Sur Ubuntu/Debian :
+# sudo apt install primer3 bioperl libparallel-forkmanager-perl libxml-libxml-perl cpanminus
+# sudo cpanm Bio::Perl Bio::SeqIO Bio::AlignIO Bio::SimpleAlign Bio::LocatableSeq Parallel::ForkManager
 
 # 4. Lancer l'application Flask
 python3 lava_flask_app.py
 ```
 Ouvrez ensuite votre navigateur sur : `http://127.0.0.1:5000`
+
 
 ---
 
