@@ -2133,7 +2133,7 @@ def background_job_scheduler():
             with executions_lock:
                 max_concurrent = int(os.environ.get('MAX_CONCURRENT_RUNS', 5))
                 min_queue_sec = int(os.environ.get('MIN_QUEUE_SECONDS', 30))
-                max_runtime_sec = int(os.environ.get('MAX_RUNTIME_SECONDS', 3600))
+                max_runtime_sec = int(os.environ.get('MAX_RUNTIME_SECONDS', 14400)) # 4 heures / 4 hours
                 now = datetime.now()
 
                 # Gestion des timeouts des jobs en cours
