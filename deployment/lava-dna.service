@@ -20,7 +20,7 @@ Environment=MAX_IP_QUEUED_JOBS=3
 Environment=DATA_RETENTION_HOURS=48
 Environment=MAX_THREADS_PER_RUN=8
 Environment=MIN_QUEUE_SECONDS=30
-Environment=MAX_RUNTIME_SECONDS=14400
+Environment=MAX_RUNTIME_SECONDS=7200
 Environment=SESSION_COOKIE_SECURE=True
 ExecStart=/opt/lava-dna/venv/bin/gunicorn --config /opt/lava-dna/deployment/gunicorn_config.py lava_flask_app:app
 ExecReload=/bin/kill -s HUP $MAINPID

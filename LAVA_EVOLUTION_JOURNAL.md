@@ -2192,22 +2192,25 @@ Explication technique :
 2. Ajout des variables d'environnement manquantes dans l'unite systemd : `MAX_QUEUED_JOBS=30`, `MAX_IP_QUEUED_JOBS=3` et `SESSION_COOKIE_SECURE=True`.
 3. Ajout de `gunicorn==22.0.0` dans `requirements_flask.txt` afin de garantir que le serveur WSGI invoque par `ExecStart` soit installe par pip.
 4. Refonte complete de `deployment/deploy.sh` : creation securisee de `/etc/lava-dna/lava.env` avec une cle `SECRET_KEY` aleatoire et stable (droits 600, proprietaire `lavauser`), creation des dossiers `uploads/` et `results/` avec permissions restreintes, suppression des dependances obsoletes non utilisees (Redis), verification de la presence des modules BioPerl (`Bio::AlignIO`, `Bio::SeqIO`, `Bio::SimpleAlign`, `Bio::LocatableSeq`), `Parallel::ForkManager` et des binaires `primer3_core` / `oligotm`.
-### [2026-09-03] Extension du Timeout de Securite des Runs (4 Heures)
+### [2026-09-03] Extension de la Duree Maximale d'Execution a 120 Minutes (2 Heures)
 
-Date/Etape : 2026-09-03 - Rehaussement du plafond de temps d'execution MAX_RUNTIME_SECONDS de 1h a 4h.
+Date/Etape : 2026-09-03 - Rehaussement du plafond de calcul MAX_RUNTIME_SECONDS a 7200s et proxy nginx a 7500s.
 
-Fichiers impactes : `lava_flask_app.py`, `deployment/lava-dna.service`, `LAVA_EVOLUTION_JOURNAL.md`.
+Fichiers impactes : `lava_flask_app.py`, `deployment/lava-dna.service`, `deployment/nginx_lava.conf`, `LAVA_EVOLUTION_JOURNAL.md`.
 
 Nature du changement : [Architecture / Configuration]
 
 Explication technique : 
-1. Passage de la constante et variable d'environnement `MAX_RUNTIME_SECONDS` de 3600 secondes (1 heure) a 14400 secondes (4 heures). Le watchdog de surveillance asynchrone applique desormais ce seuil avant d'envoyer un signal d'arret `SIGTERM`/`SIGKILL` aux sous-processus Perl.
-2. Conditionnement de `SESSION_COOKIE_SECURE` a la variable explicite d'environnement uniquement (plutot que forcee systematiquement par `FLASK_ENV=production`), afin de permettre l'usage de l'interface en HTTP direct par IP sans blocage CSRF.
+1. Rehaussement du plafond de calcul `MAX_RUNTIME_SECONDS` de 3600s (1h) a 7200s (120 minutes / 2 heures) dans l'unite systemd `lava-dna.service` et dans la boucle watchdog de `lava_flask_app.py`.
+2. Augmentation des directives de temporisation Nginx (`proxy_connect_timeout`, `proxy_send_timeout`, `proxy_read_timeout`) a 7500s dans `nginx_lava.conf`, garantissant que le reverse-proxy ne coupe pas prematurement la communication avant la decision applicative.
+3. Actualisation des messages bilingues (FR et EN) dans le dictionnaire `TRANSLATIONS` de `lava_flask_app.py` et du message de depassement de quota orientant vers la version CLI pour les jeux massifs.
+4. Conditionnement de `SESSION_COOKIE_SECURE` a la variable explicite d'environnement uniquement (plutot que forcee systematiquement par `FLASK_ENV=production`), afin de permettre l'usage de l'interface en HTTP direct par IP sans blocage CSRF.
 
 Justification biologique : 
-Les alignements pan-genomiques volumineux sur des virus hautement variables comportant des milliers de sequences et des combinatoires d'amorces complexes (notamment les modes `enriched` et `coverage` avec de multiples codes IUPAC degeneres) necessitent des temps de calcul et d'analyse thermodynamique superieurs a 1 heure. Porter le plafond a 4 heures evite d'interrompre prematurement des calculs intensifs legaux.
+La recherche combinatoire pan-genomique sur des virus hautement polymorphes (ex: virus de la Dengue, VIH, virus influenza) engendre des espaces de recherche considerables lors de l'integration de codes IUPAC degeneres et du calcul thermodynamique des energies libres a 65 degres C. Un plafond de 120 minutes permet de traiter des alignements complexes comportant des milliers de genomes sans interruption prematuree.
 
 Impact attendu : 
-Capacite a completer des designs d'amorces LAMP exhaustifs sur de grands jeux de donnees genomiques sans risquer d'arret force automatique apres 1 heure, et compatibilite immediate HTTP/HTTPS sans blocage de session.
+Aboutissement des calculs intensifs sur de larges panels genomiques via l'interface web, sans deconnexion Nginx intempestive ni arret brutal apres 1 heure.
+
 
 
