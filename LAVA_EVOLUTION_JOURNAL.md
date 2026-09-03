@@ -2201,12 +2201,13 @@ Fichiers impactes : `lava_flask_app.py`, `deployment/lava-dna.service`, `LAVA_EV
 Nature du changement : [Architecture / Configuration]
 
 Explication technique : 
-Passage de la constante et variable d'environnement `MAX_RUNTIME_SECONDS` de 3600 secondes (1 heure) a 14400 secondes (4 heures). Le watchdog de surveillance asynchrone applique desormais ce seuil avant d'envoyer un signal d'arret `SIGTERM`/`SIGKILL` aux sous-processus Perl.
+1. Passage de la constante et variable d'environnement `MAX_RUNTIME_SECONDS` de 3600 secondes (1 heure) a 14400 secondes (4 heures). Le watchdog de surveillance asynchrone applique desormais ce seuil avant d'envoyer un signal d'arret `SIGTERM`/`SIGKILL` aux sous-processus Perl.
+2. Conditionnement de `SESSION_COOKIE_SECURE` a la variable explicite d'environnement uniquement (plutot que forcee systematiquement par `FLASK_ENV=production`), afin de permettre l'usage de l'interface en HTTP direct par IP sans blocage CSRF.
 
 Justification biologique : 
 Les alignements pan-genomiques volumineux sur des virus hautement variables comportant des milliers de sequences et des combinatoires d'amorces complexes (notamment les modes `enriched` et `coverage` avec de multiples codes IUPAC degeneres) necessitent des temps de calcul et d'analyse thermodynamique superieurs a 1 heure. Porter le plafond a 4 heures evite d'interrompre prematurement des calculs intensifs legaux.
 
 Impact attendu : 
-Capacite a completer des designs d'amorces LAMP exhaustifs sur de grands jeux de donnees genomiques sans risquer d'arret force automatique apres 1 heure.
+Capacite a completer des designs d'amorces LAMP exhaustifs sur de grands jeux de donnees genomiques sans risquer d'arret force automatique apres 1 heure, et compatibilite immediate HTTP/HTTPS sans blocage de session.
 
 

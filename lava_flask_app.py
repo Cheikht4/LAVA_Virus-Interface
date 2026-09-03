@@ -465,7 +465,7 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax'
 )
-if flask_env == 'production' or os.environ.get('SESSION_COOKIE_SECURE', 'False').lower() in ('true', '1', 't'):
+if os.environ.get('SESSION_COOKIE_SECURE', 'False').lower() in ('true', '1', 't'):
     app.config['SESSION_COOKIE_SECURE'] = True
 
 import uuid
