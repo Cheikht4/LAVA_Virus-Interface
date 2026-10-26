@@ -133,11 +133,17 @@ t/canary_rota*
 t/reference_b_loop*
 t/test_f2_high_tm.txt
 t/test_fixed_tm.txt
+t/fixtures/baseline_LOOP
+t/fixtures/baseline_STEM
 t/*.log
 t/optimized_stem.log
 t/baseline_loop.log
 t/baseline_stem.log
 t/reference_a_stem.log
+
+# --------------- Archive technique (_attic) ------------------
+_attic/*
+!_attic/README.md
 
 # --------------- Re-inclusion prioritaire des baselines ------
 # Priority re-inclusion of baselines (must remain last)
