@@ -42,6 +42,7 @@ test_loop_results_amplified.fasta
 *.primers.primers
 test_loop_results
 test_loop_results*/
+*_per_signature/
 *_signatures_individuelles/
 dengue_small*/
 
@@ -118,14 +119,17 @@ LAVA_Production_2026_v3/
 t/canary_loop
 t/canary_loop.*
 t/canary_loop_amplified*
+t/canary_loop_per_signature/
 t/canary_loop_signatures_individuelles/
 t/canary_loop_run2
 t/canary_loop_run2.*
 t/canary_loop_run2_amplified*
+t/canary_loop_run2_per_signature/
 t/canary_loop_run2_signatures_individuelles/
 t/canary_stem
 t/canary_stem.*
 t/canary_stem_amplified*
+t/canary_stem_per_signature/
 t/canary_stem_signatures_individuelles/
 t/canary_stem_combinations.txt
 t/canary_stem_excluded*
