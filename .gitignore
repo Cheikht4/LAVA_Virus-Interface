@@ -1,9 +1,10 @@
 # =============================================================================
-# .gitignore — LAVA-DNA Project
+# .gitignore - LAVA-DNA Project
 # Code source uniquement / Source code only
 # =============================================================================
 
 # --------------- Environnements Python ---------------
+Makefile
 lava_env/
 venv/
 env/
@@ -101,7 +102,7 @@ config_local.py
 *.7z
 
 # --------------- Documents personnels ----------------
-# (devis, factures, etc. — pas du code)
+# (devis, factures, etc. - pas du code)
 devis pour didida/
 
 # --------------- Fichiers de débogage one-shot -------

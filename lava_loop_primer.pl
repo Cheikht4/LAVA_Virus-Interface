@@ -231,7 +231,6 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       "salt_divalent=f" => \$options{"salt_divalent"}, # new
       "salt_monovalent=f" => \$options{"salt_monovalent"}, # new
       "dna_conc=f" => \$options{"dna_conc"}, # new
-      "dna_conc=f" => \$options{"dna_conc"}, # new
       "max_primer_gen=f" => \$options{"max_primer_gen"}, # new
       "max_tm_diff=f" => \$options{"max_tm_diff"}, # new
 
@@ -465,6 +464,24 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
   # the file IO parameters.
   GetOptions(%optionMap) or die "FATAL: Options de ligne de commande invalides (Unknown option).\n";
   loadOptionsFromFile(\%options);
+  # Validation des balises chargees depuis option_file contre %optionMap
+  # Validate tags loaded from option_file against %optionMap
+  {
+    my %validOptionNames;
+    foreach my $spec (keys %optionMap) {
+      my ($names) = split(/[=:]/, $spec, 2);
+      foreach my $alias (split(/\|/, $names)) {
+        $validOptionNames{$alias} = 1;
+      }
+    }
+    foreach my $optKey (sort keys %options) {
+      next if $optKey =~ /^#/; # Ignorer les noeuds #comment / #text de XML::LibXML / Skip XML::LibXML #comment / #text nodes
+      if (!exists $validOptionNames{$optKey}) {
+        my $optFile = defined $options{"option_file"} ? $options{"option_file"} : "option_file";
+        die "FATAL: Balise d'option inconnue '$optKey' dans le fichier d'options '$optFile' (Unknown option in option_file).\n";
+      }
+    }
+  }
   my $options_r = \%options;
 
   # TODO: perl-check for file existence cause BioPerl dump isn't useful
@@ -1538,9 +1555,14 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
   $num_fwd_chunks = 1 if $num_fwd_chunks < 1;
   my $fwd_chunk_size = int(($innerForwardCount + $num_fwd_chunks - 1) / $num_fwd_chunks);
   $fwd_chunk_size = 1 if $fwd_chunk_size < 1;
+  my @fwd_worker_failures = ();
 
   $pm_fwd->run_on_finish(sub {
       my ($pid, $exit_code, $id, $exit_signal, $core_dump, $data_ref) = @_;
+      if ($exit_code != 0 || $exit_signal != 0 || (defined $data_ref && ref($data_ref) eq 'HASH' && defined $data_ref->{error})) {
+          push @fwd_worker_failures, LLNL::LAVA::ForkManager::format_worker_failure($pid, $exit_code, $id, $exit_signal, $core_dump, $data_ref);
+          return;
+      }
       if (defined $data_ref && ref($data_ref) eq 'HASH') {
           foreach my $idx (sort { $a <=> $b } keys %{$data_ref->{infos}}) {
               if (!defined $bestForwardInfos[$idx]) {
@@ -1586,6 +1608,8 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
   for (my $chunk_id = 0; $chunk_id < $num_fwd_chunks; $chunk_id++) {
       $pm_fwd->start($chunk_id) and next;
       
+      my $worker_payload;
+      my $eval_ok = eval {
       my %chunk_infos = ();
       my %chunk_penalties = ();
       my $chunk_hits = 0;
@@ -1801,7 +1825,13 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
                                       my $currentSetPenalty = $spacingPenalty + $primer3Penalty;
                                       if ($currentSetPenalty < $bestSetPenalty) {
                                           $chunk_hits++ unless exists $chunk_infos{$innerIndex};
-                                          $chunk_infos{$innerIndex} = $includeLoopPrimers ? [$loopInfo, $middleInfo, $outerInfo] : [$middleInfo, $outerInfo];
+                                          # Hash nomme pour eviter tout decalage d indice entre mode 8 amorces (loop=1) et 6 amorces (loop=0)
+                                          # Named hash to avoid any index shift between 8-primer (loop=1) and 6-primer (loop=0) modes
+                                          $chunk_infos{$innerIndex} = {
+                                              loop   => ($includeLoopPrimers ? $loopInfo : undef),
+                                              middle => $middleInfo,
+                                              outer  => $outerInfo,
+                                          };
                                           $chunk_penalties{$innerIndex} = [$spacingPenalty, $primer3Penalty, $detailStr];
                                           $bestSetPenalty = $currentSetPenalty;
                                       }
@@ -1849,7 +1879,8 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       my $prog_file_me = "$fwd_prog_dir/chunk_$chunk_id.prog";
       if (open(my $fh, '>', $prog_file_me)) { flock($fh, 2); print $fh "$chunk_done,$chunk_hits,$chunk_pruned,$chunk_evaluated\n"; close($fh); }
       
-      $pm_fwd->finish(0, {
+      $worker_payload = {
+          chunk_id => $chunk_id,
           infos => \%chunk_infos,
           penalties => \%chunk_penalties,
           hits => $chunk_hits,
@@ -1878,11 +1909,20 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
               middleToOuter_neg => $penalty_guard_middleToOuter_neg,
               middleToOuter_oob => $penalty_guard_middleToOuter_oob,
           }
-      });
+      };
+      1;
+      };
+      if (!$eval_ok) {
+          my $err = $@ || "Erreur inconnue / Unknown error";
+          $pm_fwd->finish(1, { chunk_id => $chunk_id, error => "$err" });
+          next;
+      }
+      $pm_fwd->finish(0, $worker_payload);
   } # End chunks
   $pm_fwd->wait_all_children();
   use File::Path qw(remove_tree);
   remove_tree($fwd_prog_dir) if -d $fwd_prog_dir;
+  LLNL::LAVA::ForkManager::check_worker_failures(\@fwd_worker_failures, "Signatures Forward (loop)");
   
   if ($_sig_fwd_pruned + $_sig_fwd_evaluated > 0) {
       my $pct = ($_sig_fwd_pruned / ($_sig_fwd_pruned + $_sig_fwd_evaluated)) * 100;
@@ -1990,9 +2030,14 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
   $num_rev_chunks = 1 if $num_rev_chunks < 1;
   my $rev_chunk_size = int(($innerReverseCount + $num_rev_chunks - 1) / $num_rev_chunks);
   $rev_chunk_size = 1 if $rev_chunk_size < 1;
+  my @rev_worker_failures = ();
 
   $pm_rev->run_on_finish(sub {
       my ($pid, $exit_code, $id, $exit_signal, $core_dump, $data_ref) = @_;
+      if ($exit_code != 0 || $exit_signal != 0 || (defined $data_ref && ref($data_ref) eq 'HASH' && defined $data_ref->{error})) {
+          push @rev_worker_failures, LLNL::LAVA::ForkManager::format_worker_failure($pid, $exit_code, $id, $exit_signal, $core_dump, $data_ref);
+          return;
+      }
       if (defined $data_ref && ref($data_ref) eq 'HASH') {
           foreach my $idx (sort { $a <=> $b } keys %{$data_ref->{infos}}) {
               if (!defined $bestReverseInfos[$idx]) {
@@ -2038,6 +2083,8 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
   for (my $chunk_id = 0; $chunk_id < $num_rev_chunks; $chunk_id++) {
       $pm_rev->start($chunk_id) and next;
       
+      my $worker_payload;
+      my $eval_ok = eval {
       my %chunk_infos = ();
       my %chunk_penalties = ();
       my $chunk_hits = 0;
@@ -2251,7 +2298,13 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
                                       my $currentSetPenalty = $spacingPenalty + $primer3Penalty;
                                       if ($currentSetPenalty < $bestSetPenalty) {
                                           $chunk_hits++ unless exists $chunk_infos{$innerIndex};
-                                          $chunk_infos{$innerIndex} = $includeLoopPrimers ? [$loopInfo, $middleInfo, $outerInfo] : [$middleInfo, $outerInfo];
+                                          # Hash nomme pour eviter tout decalage d indice entre mode 8 amorces (loop=1) et 6 amorces (loop=0)
+                                          # Named hash to avoid any index shift between 8-primer (loop=1) and 6-primer (loop=0) modes
+                                          $chunk_infos{$innerIndex} = {
+                                              loop   => ($includeLoopPrimers ? $loopInfo : undef),
+                                              middle => $middleInfo,
+                                              outer  => $outerInfo,
+                                          };
                                           $chunk_penalties{$innerIndex} = [$spacingPenalty, $primer3Penalty, $detailStr];
                                           $bestSetPenalty = $currentSetPenalty;
                                       }
@@ -2299,7 +2352,8 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       my $prog_file_me = "$rev_prog_dir/chunk_$chunk_id.prog";
       if (open(my $fh, '>', $prog_file_me)) { flock($fh, 2); print $fh "$chunk_done,$chunk_hits,$chunk_pruned,$chunk_evaluated\n"; close($fh); }
       
-      $pm_rev->finish(0, {
+      $worker_payload = {
+          chunk_id => $chunk_id,
           infos => \%chunk_infos,
           penalties => \%chunk_penalties,
           hits => $chunk_hits,
@@ -2328,11 +2382,20 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
               middleToOuter_neg => $penalty_guard_middleToOuter_neg,
               middleToOuter_oob => $penalty_guard_middleToOuter_oob,
           }
-      });
+      };
+      1;
+      };
+      if (!$eval_ok) {
+          my $err = $@ || "Erreur inconnue / Unknown error";
+          $pm_rev->finish(1, { chunk_id => $chunk_id, error => "$err" });
+          next;
+      }
+      $pm_rev->finish(0, $worker_payload);
   } # End chunks
   $pm_rev->wait_all_children();
   use File::Path qw(remove_tree);
   remove_tree($rev_prog_dir) if -d $rev_prog_dir;
+  LLNL::LAVA::ForkManager::check_worker_failures(\@rev_worker_failures, "Signatures Reverse (loop)");
   
   if ($_sig_rev_pruned + $_sig_rev_evaluated > 0) {
       my $pct = ($_sig_rev_pruned / ($_sig_rev_pruned + $_sig_rev_evaluated)) * 100;
@@ -2399,9 +2462,14 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
   my $global_rejected_min_len = 0;
   my $global_skipped_tm_diff = 0;
   my $global_skipped_inner_gap = 0;
+  my @val_worker_failures = ();
   
   $val_pm->run_on_finish(sub {
       my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_r) = @_;
+      if ($exit_code != 0 || $exit_signal != 0 || (defined $data_r && ref($data_r) eq 'HASH' && defined $data_r->{error})) {
+          push @val_worker_failures, LLNL::LAVA::ForkManager::format_worker_failure($pid, $exit_code, $ident, $exit_signal, $core_dump, $data_r);
+          return;
+      }
       if (defined($data_r) && ref($data_r) eq 'HASH') {
           my $cid = $data_r->{chunk_id};
           $chunk_results_map{$cid} = $data_r->{retained};
@@ -2426,8 +2494,11 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
   });
   
   for(my $chunk_id = 0; $chunk_id < $num_chunks; $chunk_id++) {
-      $val_pm->start and next;
+      $val_pm->start($chunk_id) and next;
       
+      my $worker_payload;
+      my $verbose_fh;
+      my $eval_ok = eval {
       my @chunk_retained;
       my $chunk_combined = 0;
       my $chunk_val_done = 0;
@@ -2437,7 +2508,6 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       my $chunk_rejected_max_len = 0;
       my $chunk_rejected_min_len = 0;
       
-      my $verbose_fh;
       if ($verbose_val) {
           open($verbose_fh, "| gzip >> ${verbose_base}.$$" . "_${chunk_id}.log.gz") or warn "Cannot open verbose log";
       }
@@ -2485,26 +2555,32 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
               my @fwdPrimers = ();
               my @revPrimers = ();
               
-              my $outF_v = $f_set_infos->[2];
-              my $midF_v = $f_set_infos->[1];
+              my $outF_v = $f_set_infos->{outer};
+              my $midF_v = $f_set_infos->{middle};
+              die "FATAL: Amorce manquante dans le demi-ensemble Forward (F3/F2/F1)"
+                  unless defined $outF_v && defined $midF_v && defined $innerF;
               $outF_v->{name} = 'F3';
               $midF_v->{name} = 'F2';
               $innerF->{name} = 'F1';
               push @fwdPrimers, $outF_v, $midF_v, $innerF;
               if ($includeLoopPrimers) {
-                my $loopF_v = $f_set_infos->[0];
+                my $loopF_v = $f_set_infos->{loop};
+                die "FATAL: Amorce FL manquante dans le demi-ensemble Forward" unless defined $loopF_v;
                 $loopF_v->{name} = 'FL';
                 push @fwdPrimers, $loopF_v;
               }
               
-              my $outR_v = $r_set_infos->[2];
-              my $midR_v = $r_set_infos->[1];
+              my $outR_v = $r_set_infos->{outer};
+              my $midR_v = $r_set_infos->{middle};
+              die "FATAL: Amorce manquante dans le demi-ensemble Reverse (B1/B2/B3)"
+                  unless defined $innerR && defined $midR_v && defined $outR_v;
               $innerR->{name} = 'B1';
               $midR_v->{name} = 'B2';
               $outR_v->{name} = 'B3';
               push @revPrimers, $innerR, $midR_v, $outR_v;
               if ($includeLoopPrimers) {
-                my $loopR_v = $r_set_infos->[0];
+                my $loopR_v = $r_set_infos->{loop};
+                die "FATAL: Amorce BL manquante dans le demi-ensemble Reverse" unless defined $loopR_v;
                 $loopR_v->{name} = 'BL';
                 unshift @revPrimers, $loopR_v;
               }
@@ -2514,8 +2590,8 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
                   next;
               }
 
-              my $fStart_v   = $f_set_infos->[2]->getLocation();   # F3, brin plus : bord gauche
-              my $rEnd_v     = $r_set_infos->[2]->getLocation();   # B3, brin moins : bord droit
+              my $fStart_v   = $outF_v->getLocation();   # F3, brin plus : bord gauche
+              my $rEnd_v     = $outR_v->getLocation();   # B3, brin moins : bord droit
               my $totalLen_v = $rEnd_v - $fStart_v + 1;
               if ($totalLen_v > $signatureMaxLength) {
                   $chunk_rejected_max_len++;
@@ -2528,10 +2604,10 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
               
               my $innerPair = LLNL::LAVA::PrimerSet::PCRPair->new({ "forward_info" => $innerF, "reverse_info" => $innerR });
               my $innerSetInfo = LLNL::LAVA::PrimerSetInfo::PCRPair->new({ "analyzed_pair" => $innerPair, "penalty" => $innerF->getPenalty() + $innerR->getPenalty() });
-              my $midF = $f_set_infos->[1]; my $midR = $r_set_infos->[1];
+              my $midF = $f_set_infos->{middle}; my $midR = $r_set_infos->{middle};
               my $middlePair = LLNL::LAVA::PrimerSet::PCRPair->new({ "forward_info" => $midF, "reverse_info" => $midR });
               my $middleSetInfo = LLNL::LAVA::PrimerSetInfo::PCRPair->new({ "analyzed_pair" => $middlePair, "penalty" => $midF->getPenalty() + $midR->getPenalty() });
-              my $outF = $f_set_infos->[2]; my $outR = $r_set_infos->[2];
+              my $outF = $f_set_infos->{outer}; my $outR = $r_set_infos->{outer};
               my $outerPair = LLNL::LAVA::PrimerSet::PCRPair->new({ "forward_info" => $outF, "reverse_info" => $outR });
               my $outerSetInfo = LLNL::LAVA::PrimerSetInfo::PCRPair->new({ "analyzed_pair" => $outerPair, "penalty" => $outF->getPenalty() + $outR->getPenalty() });
               
@@ -2539,7 +2615,7 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
                   "inner_info" => $innerSetInfo, "middle_info" => $middleSetInfo, "outer_info" => $outerSetInfo,
               });
               if($includeLoopPrimers) {
-                   my $loopF = $f_set_infos->[0]; my $loopR = $r_set_infos->[0];
+                   my $loopF = $f_set_infos->{loop}; my $loopR = $r_set_infos->{loop};
                    $lampSignature->setTag("has_loop_primers", 1);
                    $lampSignature->setTag("floop_info", $loopF);
                    $lampSignature->setTag("bloop_info", $loopR);
@@ -2595,9 +2671,9 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
           splice(@chunk_retained, $max_retained_signatures);
       }
       
-      if ($verbose_val && defined $verbose_fh) { close($verbose_fh); }
+      if ($verbose_val && defined $verbose_fh) { close($verbose_fh); undef $verbose_fh; }
       
-      $val_pm->finish(0, {
+      $worker_payload = {
           chunk_id => $chunk_id,
           retained => \@chunk_retained,
           combined_count => $chunk_combined,
@@ -2609,10 +2685,20 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
           rejected_min_len => $chunk_rejected_min_len,
           skipped_tm_diff => $skipped_tm_diff,
           skipped_inner_gap => $skipped_inner_gap
-      });
+      };
+      1;
+      };
+      if (!$eval_ok) {
+          my $err = $@ || "Erreur inconnue / Unknown error";
+          if ($verbose_val && defined $verbose_fh) { close($verbose_fh); }
+          $val_pm->finish(1, { chunk_id => $chunk_id, error => "$err" });
+          next;
+      }
+      $val_pm->finish(0, $worker_payload);
   }
   
   $val_pm->wait_all_children;
+  LLNL::LAVA::ForkManager::check_worker_failures(\@val_worker_failures, "Combinaison & Validation (loop)");
   
   my @flat_retained;
   for(my $c = 0; $c < $num_chunks; $c++) {
@@ -2635,10 +2721,10 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       
       my $innerPair = LLNL::LAVA::PrimerSet::PCRPair->new({ "forward_info" => $innerF, "reverse_info" => $innerR });
       my $innerSetInfo = LLNL::LAVA::PrimerSetInfo::PCRPair->new({ "analyzed_pair" => $innerPair, "penalty" => $innerF->getPenalty() + $innerR->getPenalty() });
-      my $midF = $f_set_infos->[1]; my $midR = $r_set_infos->[1];
+      my $midF = $f_set_infos->{middle}; my $midR = $r_set_infos->{middle};
       my $middlePair = LLNL::LAVA::PrimerSet::PCRPair->new({ "forward_info" => $midF, "reverse_info" => $midR });
       my $middleSetInfo = LLNL::LAVA::PrimerSetInfo::PCRPair->new({ "analyzed_pair" => $middlePair, "penalty" => $midF->getPenalty() + $midR->getPenalty() });
-      my $outF = $f_set_infos->[2]; my $outR = $r_set_infos->[2];
+      my $outF = $f_set_infos->{outer}; my $outR = $r_set_infos->{outer};
       my $outerPair = LLNL::LAVA::PrimerSet::PCRPair->new({ "forward_info" => $outF, "reverse_info" => $outR });
       my $outerSetInfo = LLNL::LAVA::PrimerSetInfo::PCRPair->new({ "analyzed_pair" => $outerPair, "penalty" => $outF->getPenalty() + $outR->getPenalty() });
       
@@ -2647,8 +2733,8 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       });
       if($includeLoopPrimers) {
            $lampSignature->setTag("has_loop_primers", 1);
-           $lampSignature->setTag("floop_info", $f_set_infos->[0]);
-           $lampSignature->setTag("bloop_info", $r_set_infos->[0]);
+           $lampSignature->setTag("floop_info", $f_set_infos->{loop});
+           $lampSignature->setTag("bloop_info", $r_set_infos->{loop});
       } else {
            $lampSignature->setTag("has_loop_primers", 0);
       }
