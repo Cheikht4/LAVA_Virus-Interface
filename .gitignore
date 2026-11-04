@@ -134,6 +134,7 @@ t/canary_stem_per_signature/
 t/canary_stem_signatures_individuelles/
 t/canary_stem_combinations.txt
 t/canary_stem_excluded*
+t/canary_entropy_out*
 t/canary_rota*
 t/reference_b_loop*
 t/test_f2_high_tm.txt
