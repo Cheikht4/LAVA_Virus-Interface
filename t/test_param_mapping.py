@@ -360,6 +360,190 @@ def find_invalid_xml_options(repo_root, valid_options):
     return invalid_xml_tags, checked_xml_files
 
 
+def find_logical_or_option_defaults(repo_root):
+    """
+    Scanne lava_loop_primer.pl, lava_stem_primer.pl et lib/LLNL/LAVA/**/*.pm
+    a la recherche de replis logiques '$quelque_chose->{cle} || <valeur>'
+    ou la valeur de repli est non nulle (ex: 42, 100000, 1.5, 'valeur').
+    Les compteurs inoffensifs '|| 0' et les conditions logiques (if/elsif, sort)
+    sont ignores.
+    Scans scripts and PM modules for '$hash->{key} || <val>' fallbacks where
+    val is non-zero. Harmless '|| 0' and boolean conditions are ignored.
+    """
+    targets = [
+        os.path.join(repo_root, "lava_loop_primer.pl"),
+        os.path.join(repo_root, "lava_stem_primer.pl"),
+    ]
+    targets.extend(
+        glob.glob(
+            os.path.join(repo_root, "lib", "LLNL", "LAVA", "**", "*.pm"),
+            recursive=True,
+        )
+    )
+
+    pattern = re.compile(
+        r"(\$[a-zA-Z_][a-zA-Z0-9_]*(?:->)?\{['\"]?[a-zA-Z0-9_]+['\"]?\}\s*\|\|\s*([^;\n,]+))"
+    )
+
+    violations = []
+
+    for filepath in sorted(targets):
+        relpath = os.path.relpath(filepath, repo_root)
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+
+        for idx, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+
+            code_line = re.sub(r"#.*$", "", line).strip()
+            if not code_line:
+                continue
+
+            if "<=>" in code_line or "cmp" in code_line:
+                continue
+
+            if re.search(r"\b(?:if|elsif|while|unless)\s*\(.*\|\|", code_line):
+                continue
+
+            for match in pattern.finditer(code_line):
+                full_expr = match.group(1).strip()
+                fallback_val = match.group(2).strip()
+
+                if re.match(r"^0(?:\.0+)?$", fallback_val) or fallback_val in ('"0"', "'0'"):
+                    continue
+
+                if re.match(r"^(?:!|exists\b|defined\b|\$|\()", fallback_val):
+                    continue
+
+                violations.append(
+                    {
+                        "file": relpath,
+                        "line": idx,
+                        "expr": full_expr,
+                        "fallback": fallback_val,
+                    }
+                )
+
+    return violations
+
+
+def find_option_with_default_mismatches(repo_root):
+    """
+    Extrait les tables %optionDefaults de lava_loop_primer.pl et lava_stem_primer.pl,
+    puis inspecte tous les appels optionWithDefault($options_r, "X", <fallback>).
+    Signale toute incohérence :
+      - soit un fallback littéral différent de la valeur dans %optionDefaults{"X"}
+        (ou une option "X" absente de %optionDefaults)
+      - soit une référence à une mauvaise clé $optionDefaults{"Y"} où Y != X.
+    Extracts %optionDefaults from both scripts and audits all optionWithDefault calls
+    for literal divergence or key mismatch against %optionDefaults.
+    """
+    scripts = ["lava_loop_primer.pl", "lava_stem_primer.pl"]
+    violations = []
+
+    for relpath in scripts:
+        filepath = os.path.join(repo_root, relpath)
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+
+        defaults_match = re.search(
+            r"my\s+%optionDefaults\s*=\s*\((.*?)\);", content, re.DOTALL
+        )
+        if not defaults_match:
+            violations.append(
+                {
+                    "file": relpath,
+                    "line": 0,
+                    "option": "ALL",
+                    "msg": "Table %optionDefaults introuvable",
+                }
+            )
+            continue
+
+        defaults_block = defaults_match.group(1)
+        defaults = {}
+        for line in defaults_block.splitlines():
+            line_clean = re.sub(r"#.*$", "", line).strip()
+            kv = re.search(r'["\']([a-zA-Z0-9_]+)["\']\s*=>\s*([^,]+)', line_clean)
+            if kv:
+                key = kv.group(1)
+                val_raw = kv.group(2).strip().strip('"\'')
+                defaults[key] = val_raw
+
+        call_pattern = re.compile(
+            r'optionWithDefault\s*\(\s*\$(?:options_r|options|opts_r|opts)\s*,\s*["\']([a-zA-Z0-9_]+)["\']\s*,\s*([^,\)]+)\)',
+            re.MULTILINE,
+        )
+
+        for match in call_pattern.finditer(content):
+            opt_name = match.group(1)
+            fallback_expr = match.group(2).strip()
+            line_no = content.count("\n", 0, match.start()) + 1
+
+            ref_match = re.search(
+                r'^\$optionDefaults\{["\']([a-zA-Z0-9_]+)["\']\}$', fallback_expr
+            )
+            if ref_match:
+                ref_key = ref_match.group(1)
+                if ref_key != opt_name:
+                    violations.append(
+                        {
+                            "file": relpath,
+                            "line": line_no,
+                            "option": opt_name,
+                            "msg": f"Cle incoherente : lit '{opt_name}' mais utilise $optionDefaults{{'{ref_key}'}}",
+                        }
+                    )
+                elif ref_key not in defaults:
+                    violations.append(
+                        {
+                            "file": relpath,
+                            "line": line_no,
+                            "option": opt_name,
+                            "msg": f"Option '{opt_name}' absente de la table %optionDefaults",
+                        }
+                    )
+                continue
+
+            # Ignorer les expressions dynamiques calibrees avec variables Perl (ex: $targetTM - 1.0)
+            if "$" in fallback_expr:
+                continue
+
+            if opt_name not in defaults:
+                violations.append(
+                    {
+                        "file": relpath,
+                        "line": line_no,
+                        "option": opt_name,
+                        "msg": f"Option '{opt_name}' utilise le repli litteral '{fallback_expr}' mais est absente de %optionDefaults",
+                    }
+                )
+            else:
+                expected_val = defaults[opt_name]
+                clean_fallback = fallback_expr.strip('"\'')
+                is_equal = False
+                try:
+                    if float(clean_fallback) == float(expected_val):
+                        is_equal = True
+                except ValueError:
+                    if clean_fallback == expected_val:
+                        is_equal = True
+
+                if not is_equal:
+                    violations.append(
+                        {
+                            "file": relpath,
+                            "line": line_no,
+                            "option": opt_name,
+                            "msg": f"Litteral '{fallback_expr}' differe de %optionDefaults ('{expected_val}')",
+                        }
+                    )
+
+    return violations
+
+
 def run_audit():
     repo_root = get_repo_root()
     print("=" * 70)
@@ -640,6 +824,38 @@ def run_audit():
     else:
         print(
             "    PASS: Toutes les balises XML des fichiers t_data/*.xml existent dans %optionMap."
+        )
+
+    logical_or_violations = find_logical_or_option_defaults(repo_root)
+    print("\n[9] Resultat de l'audit des replis logiques '||' sur options/parametres :")
+    if logical_or_violations:
+        print(
+            f"    FAIL: {len(logical_or_violations)} repli(s) logique(s) '||' non nul(s) detecte(s) (utiliser '//') :"
+        )
+        for viol in logical_or_violations:
+            print(
+                f"      - {viol['file']}:{viol['line']} : '{viol['expr']}' (repli = {viol['fallback']})"
+            )
+        success = False
+    else:
+        print(
+            "    PASS: Aucun repli '|| <non-zero>' detecte sur lecture d'options/parametres."
+        )
+
+    default_mismatches = find_option_with_default_mismatches(repo_root)
+    print("\n[10] Resultat de l'audit de coherence optionWithDefault vs %optionDefaults :")
+    if default_mismatches:
+        print(
+            f"    FAIL: {len(default_mismatches)} incoherence(s) detectee(s) dans optionWithDefault :"
+        )
+        for m in default_mismatches:
+            print(
+                f"      - {m['file']}:{m['line']} (option '{m['option']}') : {m['msg']}"
+            )
+        success = False
+    else:
+        print(
+            "    PASS: Tous les appels optionWithDefault concordent rigoureusement avec %optionDefaults."
         )
 
     print("=" * 70)

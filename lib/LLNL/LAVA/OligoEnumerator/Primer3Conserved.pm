@@ -313,11 +313,11 @@ sub getOligos
   my $startHigh = 0;
   # Récupérer le seuil d'entropie depuis les paramètres LAVA (défaut 1.5) / Retrieve entropy threshold from LAVA parameters (default 1.5)
   my $lavaParams_r = $this->{"d_lavaParams"};
-  my $entropyThreshold = $lavaParams_r->{"entropy_threshold"} || 1.5;
+  my $entropyThreshold = $lavaParams_r->{"entropy_threshold"} // 1.5;
   
   # Récupérer la taille de fenêtre (taille MINIMALE de l'amorce pour être permissif) / Retrieve window size (MINIMUM primer size to be permissive)
   # Si on utilise la taille min (ex: 18), on s'assure qu'au moins une amorce de cette taille peut passer
-  my $windowSize = $p3Targets_r->{"PRIMER_INTERNAL_MIN_SIZE"} || 18;
+  my $windowSize = $p3Targets_r->{"PRIMER_INTERNAL_MIN_SIZE"} // 18;
 
   # Lissage par fenêtre glissante
   my @smoothedEntropies = ();
@@ -439,12 +439,14 @@ sub getOligos
   # FILTRE HOMOPOLYMÈRES (Post-Processing LAVA 2026)
   # Rétabli à la demande de l'utilisateur.
   # Ce filtre élimine les amorces contenant des répétitions consécutives de la même base
-  # strictement supérieures à $maxPolyBases (par défaut 2 dans lava_loop_primer.pl, modifiable via --max_poly_bases).
+  # strictement supérieures à $maxPolyBases (par défaut 5 dans lava_loop_primer.pl, modifiable via --max_poly_bases).
+  # This filter eliminates primers containing consecutive repeats of the same base
+  # strictly greater than $maxPolyBases (default 5 in lava_loop_primer.pl, configurable via --max_poly_bases).
   
   my $maxPolyBases = $p3Targets_r->{"PRIMER_INTERNAL_OLIGO_MAX_POLY_X"};
   # Fallback sur les paramètres globaux si non défini par Primer3
   if (!defined $maxPolyBases) {
-     $maxPolyBases = $lavaParams_r->{"max_poly_bases"} || 5; 
+     $maxPolyBases = $lavaParams_r->{"max_poly_bases"} // 5; 
   }
   
   # print "INFO: Filtrage post-Primer3 des homopolymères > $maxPolyBases bases\n";
