@@ -170,7 +170,6 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       "total_signature_length=i" => \$options{"total_signature_length"},
       "signature_length_penalty_weight=f" => \$options{"signature_length_penalty_weight"},
       "verbose_validation" => \$options{"verbose_validation"},
-      "output_dir=s" => \$options{"output_dir"},
 
       "outer_primer_target_length=i" => \$options{"outer_primer_target_length"},
       "outer_primer_min_length=i" => \$options{"outer_primer_min_length"},
@@ -201,7 +200,6 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       "inner_primer_max_tm=f" => \$options{"inner_primer_max_tm"},
     
       "max_poly_bases=i" => \$options{"max_poly_bases"},
-      "assembly_batch_size=i" => \$options{"assembly_batch_size"},
       "max_retained_signatures=i" => \$options{"max_retained_signatures"}, 
       
       "max_total_degenerate_bases=i" => \$options{"max_total_degenerate_bases"},
@@ -258,6 +256,7 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       # --- FIXED PRIMERS (can be repeated multiple times) ---
       "fixed_primer=s" => \@{$options{"fixed_primer"}},
       "fixed_primer_optimize=i" => \$options{"fixed_primer_optimize"},
+      "fixed_primer_margin=i" => \$options{"fixed_primer_margin"},
     );
 
   my %optionDefaults =
@@ -286,6 +285,7 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       "inner_primer_max_length" => 26,
       "inner_primer_target_tm" => "62.0",
       "max_poly_bases" => 5,
+      "max_retained_signatures" => 100000,
       "include_loop_primers" => 1,
       "loop_min_gap" => 25,
 
@@ -477,8 +477,72 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       "    [--max_tm_diff <delta_c, default=" .
         $optionDefaults{"max_tm_diff"} .
 	">]\n" .
+      # --- PARAMETRES DE SEUILS DE DISTANCE SIGMOÏDE (TABLE 1) ---
+      "    [--spacing_middle_outer_free <bp, default=" .
+        $optionDefaults{"spacing_middle_outer_free"} .
+	">]\n" .
+      "    [--spacing_middle_outer_saturation <bp, default=" .
+        $optionDefaults{"spacing_middle_outer_saturation"} .
+	">]\n" .
+      "    [--spacing_loop_middle_free <bp, default=" .
+        $optionDefaults{"spacing_loop_middle_free"} .
+	">]\n" .
+      "    [--spacing_loop_middle_saturation <bp, default=" .
+        $optionDefaults{"spacing_loop_middle_saturation"} .
+	">]\n" .
+      "    [--spacing_inner_loop_free <bp, default=" .
+        $optionDefaults{"spacing_inner_loop_free"} .
+	">]\n" .
+      "    [--spacing_inner_loop_saturation <bp, default=" .
+        $optionDefaults{"spacing_inner_loop_saturation"} .
+	">]\n" .
+      "    [--spacing_inner_middle_free <bp, default=" .
+        $optionDefaults{"spacing_inner_middle_free"} .
+	">]\n" .
+      "    [--spacing_inner_middle_saturation <bp, default=" .
+        $optionDefaults{"spacing_inner_middle_saturation"} .
+	">]\n" .
+      "    [--spacing_inner_inner_free <bp, default=" .
+        $optionDefaults{"spacing_inner_inner_free"} .
+	">]\n" .
+      "    [--spacing_inner_inner_saturation <bp, default=" .
+        $optionDefaults{"spacing_inner_inner_saturation"} .
+	">]\n" .
+      # --- LONGUEUR DE SIGNATURE ET GEOMETRIE GLOBALE ---
+      "    [--signature_min_length <length, default=" .
+        $optionDefaults{"signature_min_length"} .
+	">]\n" .
+      "    [--total_signature_length <length, default=" .
+        $optionDefaults{"total_signature_length"} .
+	">]\n" .
+      "    [--signature_length_penalty_weight <weight, default=" .
+        $optionDefaults{"signature_length_penalty_weight"} .
+	">]\n" .
+      # --- REDUCTION SPATIALE ET SELECTION ---
+      "    [--resolve_overlap_by <penalty|coverage, default=\"" .
+        $optionDefaults{"resolve_overlap_by"} .
+	"\">]\n" .
+      "    [--window_size <bp, default=" .
+        $optionDefaults{"window_size"} .
+	">]\n" .
+      "    [--max_per_window <max, default=" .
+        $optionDefaults{"max_per_window"} .
+	">]\n" .
+      # --- AMORCES FIXEES ---
+      "    [--fixed_primer <TYPE:SEQUENCE[:POSITION]> (can be repeated)]\n" .
+      "    [--fixed_primer_optimize <0|1, default=" .
+        $optionDefaults{"fixed_primer_optimize"} .
+	">]\n" .
       "    [--fixed_primer_margin <bp, default=" .
         $optionDefaults{"fixed_primer_margin"} .
+	">]\n" .
+      # --- EXECUTION ET GESTION MEMOIRE ---
+      "    [--threads <threads, default=\"" .
+        $optionDefaults{"threads"} .
+	"\"> (alias: --cpu)]\n" .
+      "    [--verbose_validation]\n" .
+      "    [--max_retained_signatures <max, default=" .
+        $optionDefaults{"max_retained_signatures"} .
 	">]\n" .
       # -----------------------------------------
       "    [--primer3_executable <path_to_primer3, default=" .
@@ -558,7 +622,7 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
   # Valid types LOOP:   F3 B3 F2 B2 F1C B1C FLOOP BLOOP
   my @fixedPrimerSpecs = ();
   my $fixedPrimerWindows_r = {};  # Fenetre geometrique calculee / Computed geometric window
-  my @raw_fixed = @{ $options{"fixed_primer"} // [] };
+  my @raw_fixed = @{ $options{"fixed_primer"} // $optionDefaults{"fixed_primer"} };
   for my $raw (@raw_fixed) {
     my @parts = split(/:/, $raw, 3);
     if (@parts < 2 || !$parts[0] || !$parts[1]) {
@@ -2504,7 +2568,7 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
   my $combine_total = scalar(@{$masterInnerF_r});
   my $combine_t0 = time();
 
-  my $max_retained_signatures = $options_r->{"max_retained_signatures"} // 100000;
+  my $max_retained_signatures = optionWithDefault($options_r, "max_retained_signatures", $optionDefaults{"max_retained_signatures"});
   
   my $val_pm = LLNL::LAVA::ForkManager->new($options_r->{"threads"});
   my $actual_threads = $val_pm->{max_processes};
@@ -3104,6 +3168,11 @@ our $_LAVA_IS_TTY = -t STDERR ? 1 : 0;
       print $comb_fh "=====================================\n\n";
       print $comb_fh "Nombre total de signatures: " . scalar(@signatures_to_analyze) . "\n";
       print $comb_fh "Nombre total de séquences: " . $inputMSA->num_sequences() . "\n\n";
+      
+      if (scalar(@signatures_to_analyze) > 8) {
+        print $comb_fh "ATTENTION: Le plafond de combinaison (taille maximale: 4 au-dela de 8 signatures) a ete applique.\n";
+        print $comb_fh "           Des combinaisons d'ordre superieur n'ont pas ete evaluees.\n\n";
+      }
       
       for my $size (sort {$a <=> $b} keys %{$combination_results}) {
         print $comb_fh "COMBINAISONS $size par $size:\n";

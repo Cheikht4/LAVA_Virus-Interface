@@ -4,6 +4,16 @@
 Audit bidirectionnel des parametres du moteur LAVA.
 Bidirectional audit of LAVA engine parameters.
 
+REGLE ABSOLUE D'INTEGRITE / ABSOLUTE INTEGRITY RULE:
+Interdiction formelle d'ajouter la moindre exception en dur dans le code de ce
+fichier d'audit. Tout defaut transitoire ou exception de perimetre doit obligatoirement
+etre consigne dans le sas t/param_audit_known.txt avec date et justification.
+Toute entree de t/param_audit_known.txt dont le defaut ne se reproduit plus fait
+echouer l'audit (exit 1, regle d'obsolescence stricte).
+Hardcoded exceptions are strictly forbidden in this audit script. Any transitional
+defect or perimeter exception must be recorded in t/param_audit_known.txt with date
+and justification. Any stale entry causes an immediate audit failure (exit 1).
+
 Detecte quatre classes d'anomalies :
 1. Parametre declare mais jamais lu (parametre mort).
 2. Parametre lu mais jamais declare dans GetOptions (parametre orphelin).
@@ -477,10 +487,19 @@ def find_option_with_default_mismatches(repo_root):
             re.MULTILINE,
         )
 
+        defined_or_pattern = re.compile(
+            r'\$(?:options_r|options|opts_r|opts)(?:->)?\{["\']([a-zA-Z0-9_]+)["\']\}\s*//\s*([^;}\n]+)',
+            re.MULTILINE,
+        )
+
+        candidates = []
         for match in call_pattern.finditer(content):
-            opt_name = match.group(1)
-            fallback_expr = match.group(2).strip()
-            line_no = content.count("\n", 0, match.start()) + 1
+            candidates.append((match.group(1), match.group(2).strip(), match.start(), "optionWithDefault"))
+        for match in defined_or_pattern.finditer(content):
+            candidates.append((match.group(1), match.group(2).strip(), match.start(), "//"))
+
+        for opt_name, fallback_expr, match_start, syntax_type in candidates:
+            line_no = content.count("\n", 0, match_start) + 1
 
             ref_match = re.search(
                 r'^\$optionDefaults\{["\']([a-zA-Z0-9_]+)["\']\}$', fallback_expr
@@ -493,7 +512,7 @@ def find_option_with_default_mismatches(repo_root):
                             "file": relpath,
                             "line": line_no,
                             "option": opt_name,
-                            "msg": f"Cle incoherente : lit '{opt_name}' mais utilise $optionDefaults{{'{ref_key}'}}",
+                            "msg": f"Cle incoherente ({syntax_type}) : lit '{opt_name}' mais utilise $optionDefaults{{'{ref_key}'}}",
                         }
                     )
                 elif ref_key not in defaults:
@@ -502,7 +521,7 @@ def find_option_with_default_mismatches(repo_root):
                             "file": relpath,
                             "line": line_no,
                             "option": opt_name,
-                            "msg": f"Option '{opt_name}' absente de la table %optionDefaults",
+                            "msg": f"Option '{opt_name}' ({syntax_type}) absente de la table %optionDefaults",
                         }
                     )
                 continue
@@ -511,18 +530,19 @@ def find_option_with_default_mismatches(repo_root):
             if "$" in fallback_expr:
                 continue
 
+            clean_fallback = fallback_expr.strip('"\'')
+
             if opt_name not in defaults:
                 violations.append(
                     {
                         "file": relpath,
                         "line": line_no,
                         "option": opt_name,
-                        "msg": f"Option '{opt_name}' utilise le repli litteral '{fallback_expr}' mais est absente de %optionDefaults",
+                        "msg": f"Option '{opt_name}' ({syntax_type}) utilise le repli litteral '{fallback_expr}' mais est absente de %optionDefaults",
                     }
                 )
             else:
                 expected_val = defaults[opt_name]
-                clean_fallback = fallback_expr.strip('"\'')
                 is_equal = False
                 try:
                     if float(clean_fallback) == float(expected_val):
@@ -537,11 +557,118 @@ def find_option_with_default_mismatches(repo_root):
                             "file": relpath,
                             "line": line_no,
                             "option": opt_name,
-                            "msg": f"Litteral '{fallback_expr}' differe de %optionDefaults ('{expected_val}')",
+                            "msg": f"Litteral '{fallback_expr}' ({syntax_type}) differe de %optionDefaults ('{expected_val}')",
                         }
                     )
 
     return violations
+
+
+def find_missing_usage_options(repo_root):
+    """
+    Verifie la concordance tripartite stricte entre %optionMap, %optionDefaults et $usageString :
+      - Sens A : Toute option distincte declaree dans %optionMap doit apparaitre dans $usageString.
+      - Sens B : Toute option documentee dans $usageString doit exister dans %optionMap.
+      - Sens C : Toute entree de %optionDefaults doit exister dans %optionMap (pas de constante deguisee).
+    Verifies tripartite concordance between %optionMap, %optionDefaults, and $usageString.
+    """
+    scripts = ["lava_loop_primer.pl", "lava_stem_primer.pl"]
+    missing_by_script = {}
+    undeclared_by_script = {}
+    undeclared_defaults_by_script = {}
+
+    for relpath in scripts:
+        filepath = os.path.join(repo_root, relpath)
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+
+        m_usage = re.search(
+            r"(?:our|my)\s+\$usageString\s*=\s*(.*?);\s*(?:if\s*\(grep|my\s+\$alignmentFastaName)",
+            content,
+            re.DOTALL,
+        )
+        if not m_usage:
+            missing_by_script[relpath] = ["$usageString introuvable"]
+            continue
+        usage_text = m_usage.group(1)
+
+        declared_map, distinct_options, dups = extract_option_map(repo_root, relpath)
+
+        # Sens A : declare dans %optionMap -> documente dans $usageString
+        missing = []
+        for opt in sorted(distinct_options):
+            if not re.search(r"--" + re.escape(opt) + r"\b", usage_text) and not re.search(
+                r"-" + re.escape(opt) + r"\b", usage_text
+            ):
+                missing.append(opt)
+
+        if missing:
+            missing_by_script[relpath] = missing
+
+        # Sens B : documente dans $usageString -> declare dans %optionMap
+        doc_options = set()
+        for m in re.finditer(r"--([a-zA-Z0-9_]+)\b", usage_text):
+            doc_opt = m.group(1)
+            if doc_opt == "help":
+                continue
+            doc_options.add(doc_opt)
+
+        undeclared = []
+        for d_opt in sorted(doc_options):
+            if d_opt not in declared_map:
+                undeclared.append(d_opt)
+
+        if undeclared:
+            undeclared_by_script[relpath] = undeclared
+
+        # Sens C : cle dans %optionDefaults -> declaree dans %optionMap
+        defaults_match = re.search(
+            r"my\s+%optionDefaults\s*=\s*\((.*?)\);", content, re.DOTALL
+        )
+        if defaults_match:
+            defaults_block = defaults_match.group(1)
+            undef_defs = []
+            for line in defaults_block.splitlines():
+                line_clean = re.sub(r"#.*$", "", line).strip()
+                kv = re.search(r'["\']([a-zA-Z0-9_]+)["\']\s*=>', line_clean)
+                if kv:
+                    def_key = kv.group(1)
+                    if def_key not in declared_map and def_key not in undef_defs:
+                        undef_defs.append(def_key)
+            if undef_defs:
+                undeclared_defaults_by_script[relpath] = undef_defs
+
+    return missing_by_script, undeclared_by_script, undeclared_defaults_by_script
+
+
+def check_architecture_symmetry(loop_distinct, stem_distinct):
+    """
+    Verifie la symetrie stricte entre les options de lava_loop_primer.pl et lava_stem_primer.pl (Sens D).
+    Les ensembles doivent etre identiques, a l'exception :
+      - des options prefixees par 'loop_' ou 'include_loop_primers' (specifiques LOOP)
+      - des options prefixees par 'stem_' ou 'include_stem_primers' (specifiques STEM)
+      - d'une liste explicite d'exceptions assumees (ASSUMED_ASYMMETRIC_OPTIONS).
+    Toute divergence non declaree fait echouer l'audit.
+    Verifies strict option symmetry between LOOP and STEM architectures (Direction D).
+    """
+    ASSUMED_ASYMMETRIC_OPTIONS = set()
+
+    def is_architecture_specific(opt, arch):
+        if opt in ASSUMED_ASYMMETRIC_OPTIONS:
+            return True
+        if arch == "loop":
+            return opt.startswith("loop_") or opt == "include_loop_primers"
+        elif arch == "stem":
+            return opt.startswith("stem_") or opt == "include_stem_primers"
+        return False
+
+    loop_generic = {opt for opt in loop_distinct if not is_architecture_specific(opt, "loop")}
+    stem_generic = {opt for opt in stem_distinct if not is_architecture_specific(opt, "stem")}
+
+    missing_in_stem = sorted(loop_generic - stem_generic)
+    missing_in_loop = sorted(stem_generic - loop_generic)
+
+    return missing_in_stem, missing_in_loop
 
 
 def run_audit():
@@ -600,14 +727,12 @@ def run_audit():
     # PARTIE 1 : Detection des parametres morts (declares mais jamais lus)
     # PART 1: Detection of dead parameters (declared but never read)
     # -------------------------------------------------------------------------
-    dead_parameters = []
-
-    KNOWN_TRANSITIONAL_PARAMS = {"output_dir", "assembly_batch_size"}
+    known_defects = load_known_defects(repo_root)
+    reproduced_known_options = set()
+    unlisted_dead = []
+    listed_dead = []
 
     for opt_name, info in all_declared.items():
-        if opt_name in KNOWN_TRANSITIONAL_PARAMS:
-            continue
-
         target = info["target"]
         found = False
 
@@ -635,7 +760,11 @@ def run_audit():
                 break
 
         if not found:
-            dead_parameters.append((opt_name, info["file"]))
+            if opt_name in known_defects:
+                listed_dead.append((opt_name, info["file"]))
+                reproduced_known_options.add(opt_name)
+            else:
+                unlisted_dead.append((opt_name, info["file"]))
 
     # -------------------------------------------------------------------------
     # PARTIE 2 : Detection des parametres orphelins (lus mais jamais declares)
@@ -675,14 +804,12 @@ def run_audit():
     # PART 3: Detection of inert reads ($VAR assigned via optionWithDefault
     #         and never reused in the file)
     # -------------------------------------------------------------------------
-    known_defects = load_known_defects(repo_root)
     inert_reads = find_inert_option_reads(
         repo_root, ["lava_loop_primer.pl", "lava_stem_primer.pl"]
     )
 
     unlisted_inert = []
     listed_inert = []
-    reproduced_known_options = set()
 
     for item in inert_reads:
         opt = item["option"]
@@ -724,13 +851,20 @@ def run_audit():
     success = True
 
     print("\n[2] Resultat de l'audit des parametres morts :")
-    if dead_parameters:
-        print(f"    FAIL: {len(dead_parameters)} parametre(s) declare(s) mais jamais lu(s) :")
-        for dp, src in dead_parameters:
+    if listed_dead:
+        for dp, src in listed_dead:
+            k_meta = known_defects[dp]
+            print(
+                f"    KNOWN: parametre mort '{dp}' (dans {src}) "
+                f"[{k_meta['date']} - {k_meta['reason']}]"
+            )
+    if unlisted_dead:
+        print(f"    FAIL: {len(unlisted_dead)} parametre(s) mort(s) non liste(s) detecte(s) :")
+        for dp, src in unlisted_dead:
             print(f"      - {dp} (dans {src})")
         success = False
     else:
-        print("    PASS: Aucun parametre mort detecte.")
+        print("    PASS: Aucun parametre mort non liste detecte.")
 
     print("\n[3] Resultat de l'audit des parametres orphelins :")
     if orphan_parameters:
@@ -856,6 +990,54 @@ def run_audit():
     else:
         print(
             "    PASS: Tous les appels optionWithDefault concordent rigoureusement avec %optionDefaults."
+        )
+
+    missing_usage, undeclared_usage, undeclared_defaults = find_missing_usage_options(repo_root)
+    missing_in_stem, missing_in_loop = check_architecture_symmetry(loop_distinct, stem_distinct)
+    print("\n[11] Resultat de l'audit quadripartite options / defauts / aide en ligne / symetrie :")
+    usage_ok = True
+    if missing_usage:
+        total_missing = sum(len(opts) for opts in missing_usage.values())
+        print(
+            f"    FAIL (Sens A : declare -> non documente) : {total_missing} option(s) de %optionMap absente(s) de $usageString :"
+        )
+        for scr, opts in missing_usage.items():
+            print(f"      - {scr} ({len(opts)} manquante(s)) : {', '.join(opts)}")
+        usage_ok = False
+        success = False
+
+    if undeclared_usage:
+        total_undeclared = sum(len(opts) for opts in undeclared_usage.values())
+        print(
+            f"    FAIL (Sens B : documente -> non declare) : {total_undeclared} option(s) de $usageString absente(s) de %optionMap :"
+        )
+        for scr, opts in undeclared_usage.items():
+            print(f"      - {scr} ({len(opts)} non declaree(s)) : {', '.join(opts)}")
+        usage_ok = False
+        success = False
+
+    if undeclared_defaults:
+        total_undef_defaults = sum(len(opts) for opts in undeclared_defaults.values())
+        print(
+            f"    FAIL (Sens C : defaut sans declaration dans %optionMap) : {total_undef_defaults} option(s) de %optionDefaults absente(s) de %optionMap :"
+        )
+        for scr, opts in undeclared_defaults.items():
+            print(f"      - {scr} ({len(opts)} non declaree(s)) : {', '.join(opts)}")
+        usage_ok = False
+        success = False
+
+    if missing_in_stem or missing_in_loop:
+        print("    FAIL (Sens D : asymetrie inter-architectures non declaree) :")
+        if missing_in_stem:
+            print(f"      - Absente(s) dans lava_stem_primer.pl : {', '.join(missing_in_stem)}")
+        if missing_in_loop:
+            print(f"      - Absente(s) dans lava_loop_primer.pl : {', '.join(missing_in_loop)}")
+        usage_ok = False
+        success = False
+
+    if usage_ok:
+        print(
+            "    PASS: Concordance quadripartite parfaite entre %optionMap, %optionDefaults, $usageString et symetrie LOOP/STEM."
         )
 
     print("=" * 70)
